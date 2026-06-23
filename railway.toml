@@ -1,0 +1,12 @@
+[build]
+builder = "nixpacks"
+
+# Orkestratör — Her 15 dakikada bir (sistem sağlığı + Sheets mirror)
+[deploy]
+startCommand = "python main.py orkestrator"
+cronSchedule = "*/15 * * * *"
+
+# NOT: Fırsatçı ayrı bir Railway service olarak tanımlanmalı.
+# Aynı repodaki birden fazla cron için Railway dashboard'undan
+# ayrı service oluşturulur ve her biri kendi startCommand'ını alır.
+# Bkz: https://docs.railway.app/reference/cron-jobs
