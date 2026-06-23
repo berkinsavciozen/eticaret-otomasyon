@@ -30,6 +30,16 @@ def get_gmail_service():
     return build("gmail", "v1", credentials=_get_credentials())
 
 
+def read_sheet(spreadsheet_id: str, range_name: str) -> list:
+    """Sheets'ten satırları okur. Header dahil tüm satırları döner."""
+    service = get_sheets_service()
+    result = service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=range_name,
+    ).execute()
+    return result.get("values", [])
+
+
 def append_to_sheet(spreadsheet_id: str, range_name: str, values: list):
     """Sheets'in sonuna yeni satırlar ekler."""
     service = get_sheets_service()

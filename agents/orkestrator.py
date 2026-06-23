@@ -7,11 +7,21 @@ import time
 from datetime import datetime, timezone
 from core.supabase_client import get_client
 from core.logger import get_logger, log_run
-from core.sheets_client import clear_and_write_sheet
+from core.sheets_client import clear_and_write_sheet, read_sheet
 
 logger = get_logger("orkestrator")
 
 AGENT_NAME = "orkestrator"
+
+# Sheets kolon indeksleri (0-based)
+COL_ID = 0
+COL_TYPE = 1
+COL_TITLE = 2
+COL_SUMMARY = 3
+COL_AGENT = 4
+COL_STATUS = 5
+COL_CREATED = 6
+COL_NOTE = 7
 
 SHEETS_HEADER = [
     "ID", "Tip", "Başlık", "Özet", "Agent", "Durum", "Oluşturulma", "Onay Notu"
@@ -23,16 +33,31 @@ def run():
     logger.info("Orkestratör başladı")
 
     try:
+        # 1. Sheets'teki onayları önce işle (Berkin'in değişiklikleri Supabase'e yansısın)
+        approved, rejected = _process_sheet_approvals()
+
+        # 2. Bekleyen onayları say (bildirim için)
         pending_count = _check_pending_approvals()
+
+        # 3. Sheets'i Supabase'den tazele (güncel durumu yaz)
         _mirror_approval_queue_to_sheets()
+
+        # 4. Agent sağlık kontrolü
         _check_agent_health()
 
+        # 5. Bekleyen onay varsa Gmail bildirimi
         if pending_count > 0:
             _send_gmail_reminder(pending_count)
 
         duration_ms = int((time.time() - start) * 1000)
-        log_run(AGENT_NAME, status="success", run_type="cron", duration_ms=duration_ms)
-        logger.info(f"Orkestratör tamamlandı ({duration_ms}ms)")
+        log_run(
+            AGENT_NAME,
+            status="success",
+            run_type="cron",
+            duration_ms=duration_ms,
+            metadata={"approved": approved, "rejected": rejected, "pending": pending_count},
+        )
+        logger.info(f"Orkestratör tamamlandı ({duration_ms}ms) — onaylanan: {approved}, reddedilen: {rejected}")
 
     except Exception as e:
         duration_ms = int((time.time() - start) * 1000)
@@ -40,6 +65,88 @@ def run():
                 duration_ms=duration_ms, error_message=str(e))
         logger.error(f"Orkestratör hatası: {e}")
         raise
+
+
+def _process_sheet_approvals() -> tuple:
+    """
+    Sheets'teki Durum kolonunu okur.
+    'approved' veya 'rejected' olan satırları Supabase'e yansıtır.
+    Onaylananları products tablosuna ekler.
+    """
+    sheet_id = os.getenv("SHEETS_APPROVAL_QUEUE_ID")
+    if not sheet_id:
+        return 0, 0
+
+    try:
+        rows = read_sheet(sheet_id, "Onay Kuyruğu!A1:H200")
+    except Exception as e:
+        logger.warning(f"Sheets okunamadı: {e}")
+        return 0, 0
+
+    if len(rows) <= 1:  # sadece header veya boş
+        return 0, 0
+
+    approved_count = 0
+    rejected_count = 0
+    client = get_client()
+
+    for row in rows[1:]:  # header'ı atla
+        if len(row) <= COL_STATUS:
+            continue
+
+        row_id = row[COL_ID] if len(row) > COL_ID else ""
+        sheet_status = row[COL_STATUS].strip().lower() if len(row) > COL_STATUS else ""
+        decision_note = row[COL_NOTE].strip() if len(row) > COL_NOTE else ""
+
+        if not row_id or sheet_status not in ("approved", "rejected"):
+            continue
+
+        # Supabase'deki mevcut durumu kontrol et
+        try:
+            result = client.table("approval_queue").select("id, status").eq("id", row_id).execute()
+        except Exception:
+            continue
+
+        if not result.data:
+            continue
+
+        current_status = result.data[0].get("status", "")
+        if current_status != "pending":
+            continue  # zaten işlenmiş
+
+        # approval_queue güncelle
+        client.table("approval_queue").update({
+            "status": sheet_status,
+            "decision_note": decision_note,
+        }).eq("id", row_id).execute()
+
+        if sheet_status == "approved":
+            _create_product_from_approval(result.data[0]["id"], row, client)
+            approved_count += 1
+            logger.info(f"Onaylandı ve products'a eklendi: {row[COL_TITLE] if len(row) > COL_TITLE else row_id}")
+        else:
+            rejected_count += 1
+            logger.info(f"Reddedildi: {row[COL_TITLE] if len(row) > COL_TITLE else row_id}")
+
+    return approved_count, rejected_count
+
+
+def _create_product_from_approval(approval_id: str, row: list, client):
+    """Onaylanan approval_queue kaydından products tablosuna kayıt oluşturur."""
+    title = row[COL_TITLE] if len(row) > COL_TITLE else "Bilinmeyen ürün"
+    request_type = row[COL_TYPE] if len(row) > COL_TYPE else ""
+
+    # Aynı başlıkta ürün zaten varsa ekleme
+    existing = client.table("products").select("id").eq("name", title).execute()
+    if existing.data:
+        logger.info(f"products'ta zaten var, atlandı: {title}")
+        return
+
+    client.table("products").insert({
+        "name": title,
+        "status": "approved",
+        "category": request_type,
+    }).execute()
 
 
 def _check_pending_approvals() -> int:
@@ -84,7 +191,7 @@ def _mirror_approval_queue_to_sheets():
             r.get("agent_source", ""),
             r.get("status", ""),
             str(r.get("created_at", "")),
-            r.get("decision_note", ""),
+            r.get("decision_note", "") or "",
         ])
 
     clear_and_write_sheet(sheet_id, "Onay Kuyruğu!A1", values)
@@ -124,6 +231,8 @@ def _send_gmail_reminder(pending_count: int):
 
 Onay paneline gitmek için:
 {sheet_url}
+
+Onaylamak için "Durum" kolonunu "approved", reddetmek için "rejected" yap.
 
 — E-Ticaret Otomasyon Sistemi
 """
