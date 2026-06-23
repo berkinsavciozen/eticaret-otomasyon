@@ -20,6 +20,8 @@ logger = get_logger("tedarikci")
 
 AGENT_NAME = "tedarikci"
 FOLLOWUP_HOURS = 48
+SENDER_NAME = os.getenv("SENDER_NAME", "E-Ticaret Ekibi")
+SENDER_EMAIL = os.getenv("NOTIFICATION_EMAIL", "")
 
 
 def run():
@@ -134,8 +136,10 @@ Product: {product_name}
 Category: {category}
 Target unit price (TRY): {target_price if target_price else "not specified"}
 Supplier platform: {supplier.get("platform", "")}
+Sender name: {SENDER_NAME}
 
 Include: product description, MOQ question, unit/bulk price request, sample availability, delivery time and shipping options.
+End the email with Best regards, {SENDER_NAME}.
 Keep it concise and friendly. Only write the email body, no subject or explanation."""
 
     response = client.messages.create(
@@ -158,6 +162,8 @@ def _send_inquiry_email(product: dict, supplier: dict) -> bool:
 
         message = MIMEMultipart()
         message["to"] = supplier_email
+        if SENDER_EMAIL:
+            message["from"] = f"{SENDER_NAME} <{SENDER_EMAIL}>"
         message["subject"] = f"Product Inquiry: {product_name}"
         message.attach(MIMEText(email_body, "plain"))
 
