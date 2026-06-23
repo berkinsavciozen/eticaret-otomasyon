@@ -1,12 +1,16 @@
 [build]
 builder = "nixpacks"
 
-# Orkestratör — Her 15 dakikada bir (sistem sağlığı + Sheets mirror)
-[deploy]
-startCommand = "python main.py orkestrator"
-cronSchedule = "*/15 * * * *"
+# Her Railway servisi kendi AGENT_NAME ve CRON_SCHEDULE değişkenini Variables'tan alır.
+# Bu sayede tek bir railway.toml tüm servisler için geçerli olur.
+#
+# Servis başına Variables'a eklenecekler:
+#   eticaret-otomasyon  → AGENT_NAME=orkestrator   (cron: */15 * * * *)
+#   eticaret-firsatci   → AGENT_NAME=firsatci       (cron: 0 6,18 * * *)
+#   eticaret-tedarikci  → AGENT_NAME=tedarikci      (cron: 0 7 * * *)
+#   eticaret-operations → AGENT_NAME=operations     (cron: 0 8 * * *)
 
-# NOT: Fırsatçı ayrı bir Railway service olarak tanımlanmalı.
-# Aynı repodaki birden fazla cron için Railway dashboard'undan
-# ayrı service oluşturulur ve her biri kendi startCommand'ını alır.
-# Bkz: https://docs.railway.app/reference/cron-jobs
+[deploy]
+startCommand = "python main.py $AGENT_NAME"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
