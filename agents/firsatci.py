@@ -1,10 +1,10 @@
 # Fırsatçı Agent
 # Görev: Trendyol'da trend ürünleri tarar, fırsatları approval_queue'ya ekler.
 # Çalışma sıklığı: Günde 2 kez (Railway cron)
-# NOT: M2'de aktif olacak — Trendyol API erişimi M4'e kadar simüle edilir.
+# NOT: M4'e kadar MOCK_OPPORTUNITIES=true ile test edilir.
 
+import os
 import time
-from datetime import datetime, timezone
 from core.supabase_client import get_client
 from core.logger import get_logger, log_run
 
@@ -30,20 +30,31 @@ def run():
             items_processed=len(opportunities),
             items_success=len(opportunities),
             duration_ms=duration_ms,
-            metadata={"note": "mock_scan_m2_placeholder"},
+            metadata={"mock": os.getenv("MOCK_OPPORTUNITIES", "false") == "true"},
         )
-        logger.info(f"{len(opportunities)} fırsat tarandı ({duration_ms}ms)")
+        logger.info(f"{len(opportunities)} fırsat işlendi ({duration_ms}ms)")
 
     except Exception as e:
         duration_ms = int((time.time() - start) * 1000)
-        log_run(AGENT_NAME, status="failed", run_type="cron", duration_ms=duration_ms, error_message=str(e))
+        log_run(AGENT_NAME, status="failed", run_type="cron",
+                duration_ms=duration_ms, error_message=str(e))
         logger.error(f"Fırsatçı hatası: {e}")
         raise
 
 
 def _scan_opportunities() -> list:
-    # TODO M2: Trendyol Seller API V3 entegrasyonu
-    logger.info("Mock fırsat taraması (M2'de gerçek API)")
+    # TODO M4: Trendyol Seller API V3 entegrasyonu
+    if os.getenv("MOCK_OPPORTUNITIES", "false").lower() == "true":
+        logger.info("MOCK mod: 1 test fırsatı üretiliyor")
+        return [{
+            "name": "TEST - Akıllı Saat (Mock Veri)",
+            "summary": "Trendyol'da trend olan ürün. Tahmini kar marjı %35. Haftalık satış: 1200+. [BU BİR TEST KAYDIDIR]",
+            "trendyol_category": "Elektronik > Akıllı Saatler",
+            "estimated_price_tl": 850,
+            "estimated_margin_pct": 35,
+            "mock": True,
+        }]
+    logger.info("Fırsat taraması (M4'te gerçek API bağlanacak)")
     return []
 
 
@@ -59,6 +70,7 @@ def _queue_for_approval(opportunities: list):
             "status": "pending",
             "timeout_hours": 48,
         }).execute()
+    logger.info(f"{len(opportunities)} kayıt approval_queue'ya eklendi")
 
 
 if __name__ == "__main__":
