@@ -9,6 +9,7 @@ Kullanım:
   python main.py listeleme
   python main.py siparis
   python main.py finans
+  python main.py operations   ← listeleme + siparis + finans sırayla
 """
 
 import sys
@@ -51,11 +52,39 @@ def main():
         from agents.pazarlama import run
     elif agent_name == "musteri":
         from agents.musteri import run
+    elif agent_name == "operations":
+        _run_operations()
+        return
     else:
         print(f"Bilinmeyen agent: {agent_name}")
         sys.exit(1)
 
     run()
+
+
+def _run_operations():
+    """Listeleme → Sipariş → Finans sırayla çalıştırır.
+    Railway'de tek servis olarak deploy edilir: eticaret-operations
+    """
+    from core.logger import get_logger
+    logger = get_logger("operations")
+
+    steps = [
+        ("listeleme", "agents.listeleme"),
+        ("siparis",   "agents.siparis"),
+        ("finans",    "agents.finans"),
+    ]
+
+    for name, module_path in steps:
+        try:
+            logger.info(f"--- {name.upper()} başlıyor ---")
+            import importlib
+            module = importlib.import_module(module_path)
+            module.run()
+            logger.info(f"--- {name.upper()} tamamlandı ---")
+        except Exception as e:
+            logger.error(f"{name} başarısız: {e} — sonraki adıma geçiliyor")
+            # Bir agent hata verse bile diğerleri çalışmaya devam eder
 
 
 if __name__ == "__main__":
