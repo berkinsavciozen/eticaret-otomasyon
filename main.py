@@ -22,8 +22,8 @@ def main():
 
     agent_name = sys.argv[1].lower()
 
-    # UptimeRobot ping (opsiyonel)
-    ping_url = os.getenv("UPTIMEROBOT_CRON_PING_URL")
+    # Healthchecks.io ping (opsiyonel)
+    ping_url = os.getenv("HEALTHCHECKS_PING_URL")
     if ping_url:
         try:
             import requests
