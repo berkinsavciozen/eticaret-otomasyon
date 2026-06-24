@@ -1,54 +1,103 @@
-# Tedarikçi Agent
-# Görev: Onaylanan ürünler için tedarikçi bulur, teklif maili gönderir,
-#         takip eder ve proformayı approval_queue'ya ekler.
-# Çalışma sıklığı: Günde 1 kez (Railway cron) — M3'te aktif
+# Tedarikçi Agent — M4
+# Görev: Onaylanan ürünler için tedarikçi araştırması (Alibaba scraping),
+#         ürün×tedarikçi Sheet 2'ye yazma, TM-ID test maili, Sheet 3 onay akışı.
+# Çalışma sıklığı: Günde 1 kez (Railway cron: 0 7 * * *)
+#
+# Akış:
+#   Faz 1: Alibaba scraping → supplier_contacts (Supabase) + Sheet 2 (Tedarikçi Onay)
+#   Faz 2: Sheet 2 onaylı tedarikçiler → TM-ID test maili → Sheet 3 (Mail Onay)
+#   Faz 3: Sheet 3 onaylı test mailler → gerçek mail (MOCK_SUPPLIER_EMAIL)
+#   Faz 4: 48s geçen inquiry_sent'lere takip maili
 
 import os
+import re
+import json
 import time
+import uuid
 import base64
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from typing import Optional, List, Dict, Any, Tuple
 
+import requests
 import anthropic
 
 from core.supabase_client import get_client
 from core.logger import get_logger, log_run
-from core.sheets_client import get_gmail_service
+from core.sheets_client import (
+    get_gmail_service,
+    upsert_tedarikci_onay,
+    append_mail_onay,
+    check_mail_onay_approvals,
+    process_tedarikci_onay_approvals,
+    update_mail_onay_status,
+    update_row,
+    read_sheet,
+    TAB_MAIL_ONAY,
+    M_TM_ID, M_GMAIL_ONAY, M_ONAY_DURUMU,
+)
 
 logger = get_logger("tedarikci")
 
-AGENT_NAME = "tedarikci"
-FOLLOWUP_HOURS = 48
-SENDER_NAME = os.getenv("SENDER_NAME", "E-Ticaret Ekibi")
-SENDER_EMAIL = os.getenv("NOTIFICATION_EMAIL", "")
+AGENT_NAME       = "tedarikci"
+FOLLOWUP_HOURS   = 48
+SENDER_NAME      = os.getenv("SENDER_NAME", "E-Ticaret Ekibi")
+SENDER_EMAIL     = os.getenv("NOTIFICATION_EMAIL", "")
+MOCK_MAIL        = os.getenv("MOCK_SUPPLIER_EMAIL", "")
+TEST_MAIL_TO     = os.getenv("NOTIFICATION_EMAIL", "")  # Berkin'in Gmail'i
 
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ANA AKIŞ
+# ═════════════════════════════════════════════════════════════════════════════
 
 def run():
     start = time.time()
-    logger.info("Tedarikçi başladı")
+    logger.info("Tedarikçi başladı (M4)")
+    sheet_id = os.getenv("SHEETS_APPROVAL_QUEUE_ID")
 
     try:
-        processed = 0
+        # Faz 1: Alibaba araştırması → Sheet 2
+        researched = _phase1_supplier_research(sheet_id)
 
-        approved_products = _get_approved_products()
-        for product in approved_products:
-            _process_new_product(product)
-            processed += 1
+        # Faz 2: Sheet 2 onaylılar → Test maili → Sheet 3
+        test_sent = _phase2_send_test_mails(sheet_id)
 
-        followup_count = _send_followups()
+        # Faz 3: Sheet 3 onaylılar → Gerçek mail (MOCK)
+        real_sent = _phase3_send_real_mails(sheet_id)
+
+        # Faz 4: Takip maili
+        followup_count = _phase4_send_followups()
 
         duration_ms = int((time.time() - start) * 1000)
         log_run(
             AGENT_NAME,
             status="success",
             run_type="cron",
-            items_processed=processed,
-            items_success=processed,
+            items_processed=researched,
+            items_success=researched,
             duration_ms=duration_ms,
-            metadata={"followups_sent": followup_count},
+            metadata={
+                "researched": researched,
+                "test_sent": test_sent,
+                "real_sent": real_sent,
+                "followups": followup_count,
+            },
         )
-        logger.info(f"{processed} yeni ürün işlendi, {followup_count} hatırlatma gönderildi ({duration_ms}ms)")
+        logger.info(
+            f"Tedarikçi tamamlandı ({duration_ms}ms) — "
+            f"araştırıldı:{researched} test:{test_sent} gerçek:{real_sent} takip:{followup_count}"
+        )
 
     except Exception as e:
         duration_ms = int((time.time() - start) * 1000)
@@ -58,180 +107,738 @@ def run():
         raise
 
 
-def _get_approved_products() -> list:
+# ═════════════════════════════════════════════════════════════════════════════
+# FAZ 1: Alibaba araştırması → Sheet 2
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _phase1_supplier_research(sheet_id: Optional[str]) -> int:
+    """Yeni onaylı ürünler için Alibaba'dan tedarikçi araştırır ve Sheet 2'ye yazar."""
     client = get_client()
-    result = (
+
+    # Tedarikçi araştırması yapılmamış approved ürünleri bul
+    products = (
         client.table("products")
         .select("*")
-        .eq("status", "approved")
+        .in_("status", ["approved"])
         .execute()
     )
-    logger.info(f"{len(result.data)} onaylı ürün bulundu")
-    return result.data
+
+    researched = 0
+    for product in products.data:
+        pid = product["id"]
+
+        # Bu ürün için zaten araştırma yapıldı mı?
+        existing = (
+            client.table("supplier_contacts")
+            .select("id")
+            .eq("product_id", pid)
+            .execute()
+        )
+        if existing.data:
+            logger.info(f"Atlandı (zaten araştırıldı): {product.get('name')}")
+            continue
+
+        logger.info(f"Tedarikçi araştırması: {product.get('name')}")
+        suppliers = _find_suppliers(product)
+
+        for supplier in suppliers[:3]:
+            contact_id = str(uuid.uuid4())
+            relationship = _detect_relationship_type(product, supplier, client)
+            scoring     = _score_supplier(supplier)
+            supplier["scoring"] = scoring
+
+            # Supabase supplier_contacts
+            try:
+                client.table("supplier_contacts").insert({
+                    "id":              contact_id,
+                    "product_id":      pid,
+                    "supplier_name":   supplier.get("name", ""),
+                    "supplier_email":  MOCK_MAIL,
+                    "platform":        supplier.get("platform", "alibaba"),
+                    "url":             supplier.get("url", ""),
+                    "birim_usd":       supplier.get("birim_usd"),
+                    "moq":             supplier.get("moq"),
+                    "supplier_scoring": scoring,
+                    "iliski_tipi":     relationship,
+                    "status":          "research_found",
+                    "mock":            supplier.get("mock", False),
+                    "contacted_at":    datetime.now(timezone.utc).isoformat(),
+                }).execute()
+            except Exception as e:
+                logger.warning(f"supplier_contacts insert hatası: {e}")
+                continue
+
+            # Sheet 2
+            if sheet_id:
+                try:
+                    upsert_tedarikci_onay(sheet_id, {
+                        "id":            contact_id,
+                        "product_id":    str(pid),
+                        "product_title": product.get("name", ""),
+                        "supplier_name": supplier.get("name", ""),
+                        "platform":      supplier.get("platform", "alibaba"),
+                        "iliski_tipi":   relationship,
+                        "onceki_siparis_ref": supplier.get("onceki_siparis_ref", ""),
+                        "url":           supplier.get("url", ""),
+                        "birim_usd":     supplier.get("birim_usd", ""),
+                        "moq":           supplier.get("moq", ""),
+                        "scoring":       scoring,
+                        "durum":         "pending",
+                        "not":           supplier.get("not", ""),
+                        "tarih":         datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                    })
+                except Exception as e:
+                    logger.warning(f"Sheet 2 upsert hatası: {e}")
+
+        # Ürün durumunu güncelle
+        client.table("products").update({"status": "sourcing"}).eq("id", pid).execute()
+        researched += 1
+        time.sleep(1)
+
+    return researched
 
 
-def _process_new_product(product: dict):
-    product_id = product["id"]
-    product_name = product.get("name", "Bilinmeyen ürün")
-    logger.info(f"Ürün işleniyor: {product_name} (ID: {product_id})")
+# ═════════════════════════════════════════════════════════════════════════════
+# FAZ 2: Sheet 2 onaylı → Test maili → Sheet 3
+# ═════════════════════════════════════════════════════════════════════════════
 
-    suppliers = _find_suppliers(product)
-    if not suppliers:
-        logger.warning(f"Tedarikçi bulunamadı: {product_name}")
-        return
+def _phase2_send_test_mails(sheet_id: Optional[str]) -> int:
+    """Sheet 2'de Berkin tarafından onaylanan tedarikçilere test maili gönderir."""
+    if not sheet_id:
+        return 0
 
-    sent_count = 0
-    for supplier in suppliers[:3]:
-        success = _send_inquiry_email(product, supplier)
-        if success:
-            _log_supplier_contact(product_id, supplier)
-            sent_count += 1
-
-    if sent_count > 0:
-        # products tablosunda updated_at yok, sadece status güncelle
-        get_client().table("products").update(
-            {"status": "sourcing"}
-        ).eq("id", product_id).execute()
-        logger.info(f"{sent_count} tedarikçiye teklif maili gönderildi: {product_name}")
-
-
-def _find_suppliers(product: dict) -> list:
-    product_name = product.get("name", "")
-    return [
-        {
-            "name": "Alibaba Supplier A",
-            "email": os.getenv("MOCK_SUPPLIER_EMAIL", ""),
-            "platform": "alibaba",
-            "url": f"https://www.alibaba.com/trade/search?SearchText={product_name.replace(' ', '+')}",
-            "mock": True,
-        },
-        {
-            "name": "1688 Supplier B",
-            "email": os.getenv("MOCK_SUPPLIER_EMAIL", ""),
-            "platform": "1688",
-            "url": "https://www.1688.com",
-            "mock": True,
-        },
-        {
-            "name": "Yerel Toptancı C",
-            "email": os.getenv("MOCK_SUPPLIER_EMAIL", ""),
-            "platform": "local",
-            "url": "",
-            "mock": True,
-        },
-    ]
-
-
-def _generate_inquiry_email(product: dict, supplier: dict) -> str:
-    """Claude ile tedarikçiye teklif maili üretir."""
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
-    product_name = product.get("name", "")
-    category = product.get("category", "")
-    target_price = product.get("target_price_tl", "")
-
-    prompt = f"""Write a short professional supplier inquiry email for the following product.
-
-Product: {product_name}
-Category: {category}
-Target unit price (TRY): {target_price if target_price else "not specified"}
-Supplier platform: {supplier.get("platform", "")}
-Sender name: {SENDER_NAME}
-
-Include: product description, MOQ question, unit/bulk price request, sample availability, delivery time and shipping options.
-End the email with Best regards, {SENDER_NAME}.
-Keep it concise and friendly. Only write the email body, no subject or explanation."""
-
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=500,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return response.content[0].text
-
-
-def _send_inquiry_email(product: dict, supplier: dict) -> bool:
-    supplier_email = supplier.get("email", "")
-    if not supplier_email:
-        logger.info(f"Tedarikçi emaili yok, atlandı: {supplier.get('name')}")
-        return False
+    sent = 0
+    client = get_client()
 
     try:
-        product_name = product.get("name", "Ürün")
-        email_body = _generate_inquiry_email(product, supplier)
-
-        message = MIMEMultipart()
-        message["to"] = supplier_email
-        if SENDER_EMAIL:
-            message["from"] = f"{SENDER_NAME} <{SENDER_EMAIL}>"
-        message["subject"] = f"Product Inquiry: {product_name}"
-        message.attach(MIMEText(email_body, "plain"))
-
-        service = get_gmail_service()
-        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-        service.users().messages().send(userId="me", body={"raw": raw}).execute()
-
-        logger.info(f"Teklif maili gönderildi: {supplier.get('name')} → {supplier_email}")
-        return True
-
+        approved_list, _ = process_tedarikci_onay_approvals(sheet_id)
     except Exception as e:
-        logger.error(f"Mail gönderilemedi ({supplier.get('name')}): {e}")
-        return False
+        logger.warning(f"Faz 2: Sheet 2 okunamadı: {e}")
+        return 0
+
+    for item in approved_list:
+        contact_id = item["id"]
+
+        # Zaten test mail gönderilmiş mi?
+        try:
+            res = client.table("supplier_contacts").select("status, tm_id").eq("id", contact_id).execute()
+            if not res.data:
+                continue
+            contact = res.data[0]
+            if contact.get("status") not in ("research_found",):
+                continue  # zaten ilerledi
+        except Exception as e:
+            logger.warning(f"Faz 2: contact sorgu hatası {contact_id}: {e}")
+            continue
+
+        # Ürün ve tedarikçi bilgilerini çek
+        try:
+            sc_res = client.table("supplier_contacts").select("*").eq("id", contact_id).execute()
+            if not sc_res.data:
+                continue
+            sc = sc_res.data[0]
+
+            prod_res = client.table("products").select("*").eq("id", sc["product_id"]).execute()
+            if not prod_res.data:
+                continue
+            product = prod_res.data[0]
+        except Exception as e:
+            logger.warning(f"Faz 2: veri çekme hatası: {e}")
+            continue
+
+        # TM-ID üret
+        tm_id = _get_next_tm_id(client)
+
+        # Test maili gönder
+        success = _send_test_mail(product, sc, tm_id)
+        if not success:
+            continue
+
+        # Supabase güncelle
+        try:
+            client.table("supplier_contacts").update({
+                "tm_id":  tm_id,
+                "status": "test_sent",
+            }).eq("id", contact_id).execute()
+        except Exception as e:
+            logger.warning(f"Faz 2: status güncelleme hatası: {e}")
+
+        # Sheet 3
+        if sheet_id:
+            try:
+                append_mail_onay(sheet_id, {
+                    "tm_id":          tm_id,
+                    "product_id":     str(sc["product_id"]),
+                    "product_title":  product.get("name", ""),
+                    "supplier_name":  sc.get("supplier_name", ""),
+                    "mail_turu":      "ilk_temas",
+                    "test_gonderildi": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                    "not":            f"Tedarikçi: {sc.get('platform','alibaba')} | contact_id:{contact_id}",
+                })
+            except Exception as e:
+                logger.warning(f"Faz 2: Sheet 3 append hatası: {e}")
+
+        logger.info(f"Test maili gönderildi: {tm_id} → {product.get('name')} / {sc.get('supplier_name')}")
+        sent += 1
+        time.sleep(1)
+
+    return sent
 
 
-def _log_supplier_contact(product_id: str, supplier: dict):
+# ═════════════════════════════════════════════════════════════════════════════
+# FAZ 3: Sheet 3 onaylı → Gerçek mail
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _phase3_send_real_mails(sheet_id: Optional[str]) -> int:
+    """Sheet 3'te onaylanan test mailler için gerçek tedarikçi mailini gönderir."""
+    if not sheet_id:
+        return 0
+
+    sent = 0
+    client = get_client()
+
+    # Gmail inbox'ta [TM-XXX] reply var mı kontrol et → Sheet 3 güncelle
+    _check_gmail_for_tm_replies(sheet_id, client)
+
+    # Sheet 3'te onaylı olanları al
     try:
-        get_client().table("supplier_contacts").insert({
-            "product_id": product_id,
-            "supplier_name": supplier.get("name"),
-            "supplier_email": supplier.get("email"),
-            "platform": supplier.get("platform"),
-            "status": "inquiry_sent",
-            "contacted_at": datetime.now(timezone.utc).isoformat(),
-        }).execute()
+        approved_mails = check_mail_onay_approvals(sheet_id)
     except Exception as e:
-        logger.warning(f"supplier_contacts kaydı oluşturulamadı: {e}")
+        logger.warning(f"Faz 3: Sheet 3 okunamadı: {e}")
+        return 0
+
+    for mail_item in approved_mails:
+        tm_id = mail_item.get("tm_id", "")
+        if not tm_id:
+            continue
+
+        # TM-ID'den contact bul
+        try:
+            res = client.table("supplier_contacts").select("*").eq("tm_id", tm_id).execute()
+            if not res.data:
+                continue
+            sc = res.data[0]
+            if sc.get("status") != "test_sent":
+                continue
+
+            prod_res = client.table("products").select("*").eq("id", sc["product_id"]).execute()
+            if not prod_res.data:
+                continue
+            product = prod_res.data[0]
+        except Exception as e:
+            logger.warning(f"Faz 3: veri hatası {tm_id}: {e}")
+            continue
+
+        # Gerçek mail gönder (MOCK → MOCK_SUPPLIER_EMAIL)
+        success = _send_real_inquiry_email(product, sc)
+        if not success:
+            continue
+
+        # Supabase güncelle
+        now_str = datetime.now(timezone.utc).isoformat()
+        try:
+            client.table("supplier_contacts").update({
+                "status":       "inquiry_sent",
+                "contacted_at": now_str,
+            }).eq("id", sc["id"]).execute()
+        except Exception as e:
+            logger.warning(f"Faz 3: status güncelleme hatası: {e}")
+
+        # Sheet 3 güncelle
+        if sheet_id:
+            try:
+                update_mail_onay_status(
+                    sheet_id,
+                    mail_item["row_num"],
+                    status="approved",
+                    gercek_gonderim=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                )
+            except Exception as e:
+                logger.warning(f"Faz 3: Sheet 3 güncelleme hatası: {e}")
+
+        logger.info(f"Gerçek mail gönderildi: {tm_id} → {sc.get('supplier_name')} ({MOCK_MAIL})")
+        sent += 1
+
+    return sent
 
 
-def _send_followups() -> int:
+# ═════════════════════════════════════════════════════════════════════════════
+# FAZ 4: Takip maili
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _phase4_send_followups() -> int:
+    """48s geçen inquiry_sent kontaklar için takip maili gönderir."""
+    client = get_client()
     try:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=FOLLOWUP_HOURS)).isoformat()
         result = (
-            get_client().table("supplier_contacts")
+            client.table("supplier_contacts")
             .select("*")
             .eq("status", "inquiry_sent")
             .lt("contacted_at", cutoff)
             .execute()
         )
-
         sent = 0
         for contact in result.data:
-            if contact.get("supplier_email") and not contact.get("mock"):
+            if contact.get("mock"):
+                continue  # Mock kontaklar için takip gönderme
+            try:
                 _send_followup_email(contact)
-                get_client().table("supplier_contacts").update(
+                client.table("supplier_contacts").update(
                     {"status": "followup_sent"}
                 ).eq("id", contact["id"]).execute()
                 sent += 1
-
+            except Exception as e:
+                logger.warning(f"Takip maili gönderilemedi: {e}")
         return sent
-
     except Exception as e:
-        logger.warning(f"Hatırlatma kontrolü başarısız: {e}")
+        logger.warning(f"Takip kontrolü başarısız: {e}")
         return 0
 
 
-def _send_followup_email(contact: dict):
-    message = MIMEText(
-        f"Hi,\n\nJust following up on my inquiry about {contact.get('supplier_name', 'the product')}. "
-        f"Could you please share pricing and MOQ information?\n\nThank you!"
+# ═════════════════════════════════════════════════════════════════════════════
+# ALİBABA SCRAPING + FALLBACK
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _find_suppliers(product: dict) -> List[Dict[str, Any]]:
+    """
+    Ürün için Alibaba'dan tedarikçi araştırır.
+    1. Gerçek scraping dener → 2. Claude fallback
+    """
+    keyword    = product.get("name", "")
+    price_tl   = product.get("metadata", {}).get("estimated_price_tl") if product.get("metadata") else None
+
+    # 1. Gerçek Alibaba scraping
+    scraped = _scrape_alibaba(keyword)
+    if scraped and len(scraped) >= 2:
+        logger.info(f"Alibaba scraping başarılı: {len(scraped)} tedarikçi bulundu")
+        return scraped
+
+    # 2. Claude ile araştırma
+    logger.info(f"Alibaba scraping yetersiz, Claude fallback çalışıyor: {keyword}")
+    return _claude_supplier_research(keyword, price_tl)
+
+
+def _scrape_alibaba(keyword: str) -> List[Dict[str, Any]]:
+    """
+    Alibaba.com search sayfasını scrape eder.
+    JS-rendered sayfa nedeniyle başarısız olabilir → boş liste döner.
+    """
+    try:
+        q = urllib.parse.quote(keyword)
+        url = (
+            f"https://www.alibaba.com/trade/search"
+            f"?SearchText={q}&IndexArea=product_en&tab=supplier"
+        )
+        resp = requests.get(url, headers=_HEADERS, timeout=12)
+        if resp.status_code != 200:
+            logger.warning(f"Alibaba HTTP {resp.status_code}: {url}")
+            return []
+
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        suppliers = []
+
+        # 1. Embedded JSON in <script> tag
+        for script in soup.find_all("script"):
+            text = script.get_text()
+            # Alibaba embeds supplier/product data in window.__GLOBAL_DATA__ or similar
+            for pattern in [
+                r'"companyName"\s*:\s*"([^"]+)"',
+                r'"supplierName"\s*:\s*"([^"]+)"',
+            ]:
+                matches = re.findall(pattern, text)
+                if matches:
+                    for m in matches[:3]:
+                        if len(m) > 3 and m not in [s.get("name") for s in suppliers]:
+                            suppliers.append({
+                                "name":     m,
+                                "platform": "alibaba",
+                                "url":      f"https://www.alibaba.com/trade/search?SearchText={q}",
+                                "mock":     False,
+                            })
+                    if len(suppliers) >= 3:
+                        break
+
+        # 2. HTML element parsing
+        if len(suppliers) < 2:
+            for el in soup.select('[class*="supplier-name"]')[:5]:
+                name = el.get_text(strip=True)
+                if name and len(name) > 3:
+                    suppliers.append({
+                        "name":     name,
+                        "platform": "alibaba",
+                        "url":      f"https://www.alibaba.com/trade/search?SearchText={q}",
+                        "mock":     False,
+                    })
+
+        # Fiyat/MOQ parse dene
+        for i, s in enumerate(suppliers[:3]):
+            price_el = soup.select('[class*="price"]')
+            if price_el and i < len(price_el):
+                price_text = price_el[i].get_text(strip=True)
+                match = re.search(r"[\d.]+", price_text.replace(",", ""))
+                if match:
+                    s["birim_usd"] = float(match.group())
+            s.setdefault("birim_usd", None)
+            s.setdefault("moq", 50)
+
+        return suppliers[:3]
+
+    except Exception as e:
+        logger.warning(f"Alibaba scraping hatası: {e}")
+        return []
+
+
+def _claude_supplier_research(keyword: str, price_tl: Optional[float] = None) -> List[Dict[str, Any]]:
+    """
+    Claude Haiku ile Alibaba'da bulunabilecek tedarikçi profilleri üretir.
+    Bu araştırma amaçlıdır — gerçek sipariş verilmez.
+    """
+    ai = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+    price_info = f"Hedef satış fiyatı yaklaşık {price_tl} TL" if price_tl else ""
+
+    prompt = f"""Alibaba.com'da '{keyword}' ürünü için 3 farklı tedarikçi profili oluştur.
+{price_info}
+Bu profiller araştırma amaçlı ve gerçekçi olmalı.
+
+SADECE JSON dizisi döndür:
+[
+  {{
+    "name": "Tedarikçi şirket adı (Çince şirket veya İngilizce marka)",
+    "platform": "alibaba",
+    "url": "https://www.alibaba.com/trade/search?SearchText={urllib.parse.quote(keyword)}",
+    "birim_usd": 12.5,
+    "moq": 50,
+    "yil": 5,
+    "gold_supplier": true,
+    "rating": 4.8,
+    "teslimat_gun": 30,
+    "not": "Trade assurance destekler. Min. sipariş 50 adet.",
+    "mock": true
+  }}
+]
+
+Fiyatlar gerçekçi olsun (USD). 3 farklı fiyat/kalite segmenti seç (budget/mid/premium)."""
+
+    try:
+        resp = ai.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=800,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+        suppliers = json.loads(raw)
+        for s in suppliers:
+            s.setdefault("mock", True)
+        return suppliers[:3]
+    except Exception as e:
+        logger.error(f"Claude supplier research hatası: {e}")
+        # Hardcoded fallback — absolute minimum
+        return [
+            {
+                "name": f"{keyword.title()} Manufacturer A",
+                "platform": "alibaba",
+                "url": f"https://www.alibaba.com/trade/search?SearchText={urllib.parse.quote(keyword)}",
+                "birim_usd": None,
+                "moq": 50,
+                "mock": True,
+            }
+        ]
+
+
+def _score_supplier(supplier: Dict[str, Any]) -> Dict[str, int]:
+    """
+    Tedarikçi puanlaması (0-100).
+    Rating/30 + Fiyat/30 + Teslimat/20 + Feedback/20
+    """
+    # Rating skoru (0-30): gold supplier + yıl sayısı
+    is_gold   = supplier.get("gold_supplier", False)
+    years     = int(supplier.get("yil", 0) or 0)
+    rating    = float(supplier.get("rating", 4.0) or 4.0)
+    rating_s  = min(30, int(is_gold * 10 + min(years, 10) + int((rating - 3.0) * 5)))
+
+    # Fiyat skoru (0-30): fiyat ne kadar düşükse o kadar iyi
+    birim     = float(supplier.get("birim_usd", 0) or 0)
+    if birim <= 0:
+        fiyat_s = 15  # bilinmiyorsa nötr
+    elif birim <= 5:   fiyat_s = 30
+    elif birim <= 10:  fiyat_s = 25
+    elif birim <= 20:  fiyat_s = 18
+    elif birim <= 50:  fiyat_s = 10
+    else:              fiyat_s = 5
+
+    # Teslimat skoru (0-20)
+    gun = int(supplier.get("teslimat_gun", 35) or 35)
+    if gun <= 15:   teslimat_s = 20
+    elif gun <= 25: teslimat_s = 15
+    elif gun <= 35: teslimat_s = 10
+    elif gun <= 50: teslimat_s = 5
+    else:           teslimat_s = 2
+
+    # Feedback skoru (0-20): şimdilik rating'den türet
+    feedback_s = min(20, int((rating - 3.0) * 10))
+
+    total = rating_s + fiyat_s + teslimat_s + feedback_s
+    return {
+        "total":    total,
+        "rating":   rating_s,
+        "fiyat":    fiyat_s,
+        "teslimat": teslimat_s,
+        "feedback": feedback_s,
+    }
+
+
+def _detect_relationship_type(product: dict, supplier: dict, client) -> str:
+    """
+    Tedarikçi ilişki tipini belirler.
+    'new' / 'known_new_product' / 'reorder'
+    """
+    supplier_name = supplier.get("name", "").lower().strip()
+    product_name  = product.get("name", "").lower().strip()
+
+    try:
+        # Bu tedarikçiyle daha önce çalışıldı mı?
+        prev = (
+            client.table("supplier_contacts")
+            .select("product_id, supplier_name")
+            .ilike("supplier_name", f"%{supplier_name[:20]}%")
+            .execute()
+        )
+        if not prev.data:
+            return "new"
+
+        # Aynı ürün kategorisiyle çalışıldı mı?
+        for p in prev.data:
+            if product_name[:10].lower() in (p.get("supplier_name", "") or "").lower():
+                return "reorder"
+
+        return "known_new_product"
+
+    except Exception:
+        return "new"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# TM-ID SİSTEMİ
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _get_next_tm_id(client) -> str:
+    """
+    Sıradaki TM-ID'yi döner. Formatı: TM-001, TM-042 vb.
+    supplier_contacts tablosundaki tm_id sayısından türetilir.
+    """
+    try:
+        res = (
+            client.table("supplier_contacts")
+            .select("tm_id")
+            .not_.is_("tm_id", "null")
+            .execute()
+        )
+        n = len(res.data) + 1
+    except Exception:
+        n = 1
+    return f"TM-{n:03d}"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# MAİL FONKSİYONLARI
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _generate_inquiry_email(product: dict, supplier: dict) -> str:
+    """Claude Haiku ile tedarikçi teklif maili üretir."""
+    ai = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    product_name = product.get("name", "")
+    category     = product.get("category", "")
+
+    prompt = f"""Write a concise professional supplier inquiry email.
+
+Product: {product_name}
+Category: {category}
+Supplier platform: {supplier.get("platform", "alibaba")}
+Sender name: {SENDER_NAME}
+
+Include: product specs question, MOQ, unit/bulk price, sample availability, delivery time, payment terms.
+End with: Best regards, {SENDER_NAME}
+Write only the email body. Keep under 200 words. Professional, friendly tone."""
+
+    resp = ai.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=400,
+        messages=[{"role": "user", "content": prompt}],
     )
-    message["to"] = contact["supplier_email"]
+    return resp.content[0].text.strip()
+
+
+def _send_test_mail(product: dict, supplier_contact: dict, tm_id: str) -> bool:
+    """
+    Test mailini NOTIFICATION_EMAIL'e gönderir (Berkin'in Gmail'i).
+    Konu: [TM-XXX] Product Inquiry: {ürün} — {tedarikçi}
+    MOCK_SUPPLIER_EMAIL'e değil — bu sadece onay için.
+    """
+    if not TEST_MAIL_TO:
+        logger.warning("TEST_MAIL_TO (NOTIFICATION_EMAIL) tanımlı değil")
+        return False
+
+    try:
+        product_name    = product.get("name", "Ürün")
+        supplier_name   = supplier_contact.get("supplier_name", "Tedarikçi")
+        email_body      = _generate_inquiry_email(product, supplier_contact)
+
+        preview_note = f"""--- TEST MAİL ÖNIZLEME ---
+TM-ID: {tm_id}
+Tedarikçi: {supplier_name}
+Platform: {supplier_contact.get("platform", "alibaba")}
+Tahmini Birim: {supplier_contact.get("birim_usd", "?")} USD
+MOQ: {supplier_contact.get("moq", "?")}
+
+Bu mail onaylanırsa MOCK tedarikçi adresine ({MOCK_MAIL}) gönderilecektir.
+Onaylamak için Google Sheets Mail Onay sekmesindeki "Excel Onay" kolonuna ONAY yazın,
+ya da bu maili yanıtlayın.
+
+--- MAIL İÇERİĞİ ---
+{email_body}"""
+
+        message = MIMEMultipart()
+        message["to"]      = TEST_MAIL_TO
+        message["subject"] = f"[{tm_id}] Product Inquiry: {product_name} — {supplier_name}"
+        if SENDER_EMAIL:
+            message["from"] = f"{SENDER_NAME} <{SENDER_EMAIL}>"
+        message.attach(MIMEText(preview_note, "plain"))
+
+        service = get_gmail_service()
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        logger.info(f"Test maili gönderildi: [{tm_id}] → {TEST_MAIL_TO}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Test mail gönderilemedi ({tm_id}): {e}")
+        return False
+
+
+def _send_real_inquiry_email(product: dict, supplier_contact: dict) -> bool:
+    """
+    Onaylanmış tedarikçiye gerçek teklif mailini gönderir.
+    Şu an MOCK_SUPPLIER_EMAIL'e gider. TM-ID konu satırında YOK.
+    """
+    supplier_email = MOCK_MAIL or supplier_contact.get("supplier_email", "")
+    if not supplier_email:
+        return False
+
+    try:
+        product_name = product.get("name", "Ürün")
+        supplier_name = supplier_contact.get("supplier_name", "Supplier")
+        email_body = _generate_inquiry_email(product, supplier_contact)
+
+        message = MIMEMultipart()
+        message["to"]      = supplier_email
+        message["subject"] = f"Product Inquiry: {product_name}"  # TM-ID YOK
+        if SENDER_EMAIL:
+            message["from"] = f"{SENDER_NAME} <{SENDER_EMAIL}>"
+        message.attach(MIMEText(email_body, "plain"))
+
+        service = get_gmail_service()
+        raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        service.users().messages().send(userId="me", body={"raw": raw}).execute()
+        logger.info(f"Gerçek teklif maili gönderildi: {supplier_name} → {supplier_email}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Gerçek mail gönderilemedi: {e}")
+        return False
+
+
+def _send_followup_email(contact: dict):
+    """48s geçen inquiry için takip maili."""
+    if not MOCK_MAIL:
+        return
+    message = MIMEText(
+        f"Hi,\n\nFollowing up on my earlier inquiry about "
+        f"{contact.get('supplier_name', 'the product')}. "
+        f"Could you please share pricing and MOQ information?\n\nThank you!\n{SENDER_NAME}"
+    )
+    message["to"]      = MOCK_MAIL
     message["subject"] = "Follow-up: Product Inquiry"
+    if SENDER_EMAIL:
+        message["from"] = f"{SENDER_NAME} <{SENDER_EMAIL}>"
 
     service = get_gmail_service()
     raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
     service.users().messages().send(userId="me", body={"raw": raw}).execute()
-    logger.info(f"Hatırlatma maili gönderildi: {contact.get('supplier_name')}")
+    logger.info(f"Takip maili gönderildi: {contact.get('supplier_name')}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# GMAİL GELEN KUTUSU KONTROLÜ
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _check_gmail_for_tm_replies(sheet_id: str, client):
+    """
+    Gmail'de [TM-XXX] içeren yanıtları arar.
+    Bulursa Sheet 3'te Gmail Onay kolonunu günceller.
+    """
+    try:
+        service = get_gmail_service()
+        # Son 7 günde gelen [TM- ile başlayan konular
+        results = service.users().messages().list(
+            userId="me",
+            q="in:inbox [TM- newer_than:7d",
+            maxResults=20,
+        ).execute()
+
+        messages = results.get("messages", [])
+        if not messages:
+            return
+
+        # Sheet 3'ü oku
+        try:
+            sheet3_rows = read_sheet(sheet_id, f"'{TAB_MAIL_ONAY}'!A1:K500")
+        except Exception:
+            sheet3_rows = []
+
+        for msg_ref in messages:
+            try:
+                msg = service.users().messages().get(
+                    userId="me",
+                    id=msg_ref["id"],
+                    format="metadata",
+                    metadataHeaders=["subject", "from"],
+                ).execute()
+                subject = next(
+                    (h["value"] for h in msg["payload"]["headers"] if h["name"] == "Subject"),
+                    ""
+                )
+                # [TM-001] gibi pattern ara
+                match = re.search(r"\[?(TM-\d{3})\]?", subject)
+                if not match:
+                    continue
+                found_tm = match.group(1)
+                logger.info(f"Gmail'de {found_tm} yanıtı bulundu")
+
+                # Sheet 3'te bu TM-ID'yi bul ve Gmail Onay güncelle
+                for i, row in enumerate(sheet3_rows[1:], start=2):
+                    if row and len(row) > M_TM_ID and row[M_TM_ID] == found_tm:
+                        row_padded = row + [""] * (11 - len(row))
+                        row_padded[M_GMAIL_ONAY] = "Gmail Yanıtı Alındı"
+                        if row_padded[M_ONAY_DURUMU] == "pending":
+                            row_padded[M_ONAY_DURUMU] = "approved"
+                        update_row(sheet_id, "Mail Onay", i, row_padded)
+                        logger.info(f"Sheet 3 Gmail Onay güncellendi: {found_tm}")
+                        break
+
+            except Exception as e:
+                logger.warning(f"Gmail mesaj işleme hatası: {e}")
+
+    except Exception as e:
+        logger.warning(f"Gmail inbox kontrolü başarısız: {e}")
 
 
 if __name__ == "__main__":
