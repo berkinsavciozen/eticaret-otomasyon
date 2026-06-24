@@ -225,7 +225,7 @@ def _phase2_send_test_mails(sheet_id: Optional[str]) -> int:
             if not res.data:
                 continue
             contact = res.data[0]
-            if contact.get("status") not in ("research_found",):
+            if contact.get("status") not in ("research_found", "approved"):
                 continue  # zaten ilerledi
         except Exception as e:
             logger.warning(f"Faz 2: contact sorgu hatası {contact_id}: {e}")
@@ -522,10 +522,10 @@ SADECE JSON dizisi döndür:
 ]
 
 KURALLAR:
-- "url" alanı her tedarikçi için FARKLI ve gerçekçi bir Alibaba ürün sayfası URL'i olmalı.
-  Format: https://www.alibaba.com/product-detail/{{urun-slug-ingilizce}}_{{10-haneli-benzersiz-id}}.html
-  Örnek: https://www.alibaba.com/product-detail/resistance-band-set-latex-5pcs_1600234567890.html
-  Her tedarikçi için farklı slug ve ID kullan. Asla genel search URL'i kullanma.
+- "url" alanı her tedarikçi için, o tedarikçinin şirket adını ve ürünü birleştiren gerçek Alibaba arama URL'i olmalı.
+  Format: https://www.alibaba.com/trade/search?SearchText={{TEDARIKCI_ADI_INGILIZCE+URUN_ADI_INGILIZCE}}
+  Tedarikçi adı ve ürün adını URL encode ederek birleştir. Her tedarikçi için FARKLI URL kullan.
+  Örnek: https://www.alibaba.com/trade/search?SearchText=Dongguan+Elastic+Force+resistance+band+set
 - Fiyatlar gerçekçi olsun (USD). 3 farklı fiyat/kalite segmenti seç (budget/mid/premium)."""
 
     try:
