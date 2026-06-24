@@ -10,6 +10,7 @@ from core.logger import get_logger, log_run
 from core.sheets_client import (
     setup_all_sheets,
     mirror_urun_onay,
+    mirror_tedarikci_onay,
     process_urun_onay_approvals,
     process_tedarikci_onay_approvals,
     check_mail_onay_approvals,
@@ -47,8 +48,9 @@ def run():
         # 2. Bekleyen onayları say
         pending_counts = _check_pending_approvals()
 
-        # 3. Sheet 1'i Supabase'den tazele
+        # 3. Sheet 1 ve Sheet 2'yi Supabase'den tazele
         _mirror_urun_onay_to_sheets(sheet_id)
+        _mirror_tedarikci_onay_to_sheets(sheet_id)
 
         # 4. Dashboard güncelle
         _refresh_dashboard_step(sheet_id, pending_counts)
@@ -272,6 +274,27 @@ def _mirror_urun_onay_to_sheets(sheet_id: str):
 
     count = mirror_urun_onay(sheet_id, rows.data)
     logger.info(f"Sheet 1 mirror: {count} kayıt yazıldı")
+
+
+# ── Sheet 2 mirror ────────────────────────────────────────────────────────────
+
+def _mirror_tedarikci_onay_to_sheets(sheet_id: str):
+    """supplier_contacts tablosunu Sheet 2'ye yazar (products join ile)."""
+    if not sheet_id:
+        return
+    client = get_client()
+    try:
+        sc_res = client.table("supplier_contacts").select("*").order("contacted_at", desc=False).execute()
+        prod_res = client.table("products").select("id, name").execute()
+        prod_map = {p["id"]: p["name"] for p in prod_res.data}
+        rows = []
+        for sc in sc_res.data:
+            sc["product_name"] = prod_map.get(sc.get("product_id"), "")
+            rows.append(sc)
+        count = mirror_tedarikci_onay(sheet_id, rows)
+        logger.info(f"Sheet 2 mirror: {count} tedarikçi yazıldı")
+    except Exception as e:
+        logger.warning(f"Sheet 2 mirror hatası: {e}")
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────

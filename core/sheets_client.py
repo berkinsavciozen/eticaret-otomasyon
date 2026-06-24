@@ -401,6 +401,54 @@ def process_urun_onay_approvals(spreadsheet_id: str) -> tuple:
 
 # ── Sheet 2: Tedarikçi Onay ───────────────────────────────────────────────────
 
+def mirror_tedarikci_onay(spreadsheet_id: str, rows_data: List[Dict[str, Any]]):
+    """
+    supplier_contacts verilerini Sheet 2'ye yazar (clear + rewrite).
+    Supabase status → Türkçe Durum eşlemesi yapar.
+    """
+    STATUS_MAP = {
+        "research_found": "pending",
+        "approved":       "onaylandı",
+        "inquiry_sent":   "mail gönderildi",
+        "followup_sent":  "takip gönderildi",
+        "rejected":       "reddedildi",
+        "completed":      "tamamlandı",
+    }
+    values = [TEDARIKCI_HEADER]
+    for r in rows_data:
+        scoring = r.get("supplier_scoring") or {}
+        if isinstance(scoring, str):
+            import json as _json
+            try:
+                scoring = _json.loads(scoring)
+            except Exception:
+                scoring = {}
+        supabase_status = r.get("status", "")
+        display_status  = STATUS_MAP.get(supabase_status, supabase_status)
+        values.append([
+            str(r.get("id", "")),
+            str(r.get("product_id", "")),
+            r.get("product_name", ""),           # products tablosundan join edilmiş gelecek
+            r.get("supplier_name", ""),
+            r.get("platform", "alibaba"),
+            r.get("iliski_tipi", "new"),
+            "",                                   # önceki sipariş ref
+            r.get("url", ""),
+            str(r.get("birim_usd", "")),
+            str(r.get("moq", "")),
+            str(scoring.get("total", "")),
+            str(scoring.get("rating", "")),
+            str(scoring.get("fiyat", "")),
+            str(scoring.get("teslimat", "")),
+            str(scoring.get("feedback", "")),
+            display_status,
+            r.get("notes", ""),
+            str(r.get("contacted_at", ""))[:16],
+        ])
+    clear_and_write_sheet(spreadsheet_id, f"'{TAB_TEDARIKCI_ONAY}'!A1", values)
+    return len(rows_data)
+
+
 def upsert_tedarikci_onay(spreadsheet_id: str, row_data: Dict[str, Any]):
     """
     Tedarikçi Onay sheet'ine yeni ürün×tedarikçi satırı ekler.
