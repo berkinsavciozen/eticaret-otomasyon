@@ -317,6 +317,95 @@ def setup_all_sheets(spreadsheet_id: str):
         except Exception as e:
             pass  # sekme henüz indexlenmemiş olabilir, bir sonraki cron'da tekrar dener
 
+    # 4. Dropdown validation kur
+    try:
+        _setup_validations(spreadsheet_id, service)
+    except Exception as e:
+        pass  # validation hatası kritik değil
+
+
+def _make_validation_request(sheet_id: int, col: int, values: list, strict: bool = True) -> dict:
+    """Google Sheets setDataValidation batchUpdate request nesnesi üretir."""
+    return {
+        "setDataValidation": {
+            "range": {
+                "sheetId":          sheet_id,
+                "startRowIndex":    1,      # header'ı atla
+                "endRowIndex":      1000,
+                "startColumnIndex": col,
+                "endColumnIndex":   col + 1,
+            },
+            "rule": {
+                "condition": {
+                    "type":   "ONE_OF_LIST",
+                    "values": [{"userEnteredValue": v} for v in values],
+                },
+                "showCustomUi": True,
+                "strict":       strict,
+            },
+        }
+    }
+
+
+def _setup_validations(spreadsheet_id: str, service):
+    """
+    Kullanıcı-düzenlenebilir kolonlara dropdown validation ekler.
+    Tüm sheetlerde status isimleri tutarlı olur.
+    """
+    # Numeric sheet ID'leri al
+    spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    id_map = {
+        s["properties"]["title"]: s["properties"]["sheetId"]
+        for s in spreadsheet.get("sheets", [])
+    }
+
+    # Durum değerleri — kullanıcı yazar
+    ONAY_DEGERLERI   = ["beklemede", "ONAY", "RED"]
+    # Durum değerleri — sistem yazar (mirror sonrası), kullanıcı salt okunur olarak görür
+    SISTEM_DEGERLERI = ["beklemede", "ONAY", "RED", "onaylandı", "reddedildi",
+                        "mail gönderildi", "takip gönderildi", "tamamlandı"]
+
+    requests = []
+
+    # Sheet 1: Durum (D = 3)
+    if TAB_URUN_ONAY in id_map:
+        requests.append(_make_validation_request(
+            id_map[TAB_URUN_ONAY], col=3,
+            values=SISTEM_DEGERLERI
+        ))
+
+    # Sheet 2: Durum (P = 15)
+    if TAB_TEDARIKCI_ONAY in id_map:
+        requests.append(_make_validation_request(
+            id_map[TAB_TEDARIKCI_ONAY], col=15,
+            values=SISTEM_DEGERLERI
+        ))
+
+    # Sheet 3: Excel Onay (G = 6) — kullanıcı ONAY yazar, blank da geçerli
+    if TAB_MAIL_ONAY in id_map:
+        requests.append(_make_validation_request(
+            id_map[TAB_MAIL_ONAY], col=6,
+            values=["ONAY"], strict=False
+        ))
+        # Onay Durumu (I = 8) — sistem yönetir
+        requests.append(_make_validation_request(
+            id_map[TAB_MAIL_ONAY], col=8,
+            values=["pending", "approved", "sent"], strict=False
+        ))
+
+    # Sheet 4: Durum (K = 10)
+    if TAB_PROFORMA_ONAY in id_map:
+        requests.append(_make_validation_request(
+            id_map[TAB_PROFORMA_ONAY], col=10,
+            values=SISTEM_DEGERLERI
+        ))
+
+    if requests:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": requests},
+        ).execute()
+
 
 # ── Sheet 1: Ürün Onay ────────────────────────────────────────────────────────
 
@@ -326,6 +415,11 @@ def mirror_urun_onay(spreadsheet_id: str, rows_data: List[Dict[str, Any]]):
     rows_data: Supabase approval_queue kayıtları listesi.
     Scoring sub-parametreler metadata JSONB alanından okunur.
     """
+    STATUS_MAP_URUN = {
+        "pending":  "beklemede",
+        "approved": "onaylandı",
+        "rejected": "reddedildi",
+    }
     values = [URUN_HEADER]
     for r in rows_data:
         meta = r.get("metadata") or {}
@@ -339,7 +433,7 @@ def mirror_urun_onay(spreadsheet_id: str, rows_data: List[Dict[str, Any]]):
             str(r.get("id", "")),
             r.get("title", ""),
             r.get("category", ""),
-            r.get("status", ""),
+            STATUS_MAP_URUN.get(r.get("status", ""), r.get("status", "")),
             str(priority.get("rank", "")),
             priority.get("reason", ""),
             str(scoring.get("total", "")),
@@ -380,7 +474,7 @@ def process_urun_onay_approvals(spreadsheet_id: str) -> tuple:
     except Exception:
         return [], []
 
-    APPROVED_VALUES = {"approved", "onay"}
+    APPROVED_VALUES = {"approved", "onay", "onaylandı"}
     REJECTED_VALUES = {"rejected", "red", "reddedildi"}
 
     approved, rejected = [], []
