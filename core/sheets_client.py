@@ -380,6 +380,9 @@ def process_urun_onay_approvals(spreadsheet_id: str) -> tuple:
     except Exception:
         return [], []
 
+    APPROVED_VALUES = {"approved", "onay"}
+    REJECTED_VALUES = {"rejected", "red", "reddedildi"}
+
     approved, rejected = [], []
     for row in rows[1:]:
         if len(row) <= U_DURUM:
@@ -387,9 +390,9 @@ def process_urun_onay_approvals(spreadsheet_id: str) -> tuple:
         row_id = row[U_ID].strip() if len(row) > U_ID else ""
         status  = row[U_DURUM].strip().lower() if len(row) > U_DURUM else ""
         note    = row[U_REDDET_NOTU].strip() if len(row) > U_REDDET_NOTU else ""
-        if not row_id or status not in ("approved", "rejected"):
+        if not row_id or status not in (APPROVED_VALUES | REJECTED_VALUES):
             continue
-        if status == "approved":
+        if status in APPROVED_VALUES:
             approved.append({"id": row_id, "note": note})
         else:
             rejected.append({"id": row_id, "note": note})
@@ -445,6 +448,9 @@ def process_tedarikci_onay_approvals(spreadsheet_id: str) -> tuple:
     except Exception:
         return [], []
 
+    APPROVED_VALUES = {"approved", "onay"}
+    REJECTED_VALUES = {"rejected", "red", "reddedildi"}
+
     approved, rejected = [], []
     for row in rows[1:]:
         if len(row) <= T_DURUM:
@@ -452,9 +458,9 @@ def process_tedarikci_onay_approvals(spreadsheet_id: str) -> tuple:
         row_id = row[T_ID].strip() if len(row) > T_ID else ""
         status  = row[T_DURUM].strip().lower() if len(row) > T_DURUM else ""
         note    = row[T_NOT].strip() if len(row) > T_NOT else ""
-        if not row_id or status not in ("approved", "rejected"):
+        if not row_id or status not in (APPROVED_VALUES | REJECTED_VALUES):
             continue
-        if status == "approved":
+        if status in APPROVED_VALUES:
             approved.append({"id": row_id, "note": note,
                              "product_id": row[T_URUN_ID] if len(row) > T_URUN_ID else ""})
         else:
