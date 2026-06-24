@@ -268,8 +268,11 @@ def update_row(spreadsheet_id: str, tab: str, row_num: int, values: List):
 # ── Setup: ilk çalışmada tüm sekme başlıklarını yaz ──────────────────────────
 
 def setup_all_sheets(spreadsheet_id: str):
-    """Tüm 5 sekme için header satırlarını yazar (mevcut veriyi silmez)."""
-    tabs = [
+    """
+    Tüm 5 sekmeyi oluşturur (yoksa) ve header satırlarını yazar.
+    Mevcut veriye dokunmaz.
+    """
+    required_tabs = [
         (TAB_URUN_ONAY,      URUN_HEADER),
         (TAB_TEDARIKCI_ONAY, TEDARIKCI_HEADER),
         (TAB_MAIL_ONAY,      MAIL_HEADER),
@@ -277,20 +280,42 @@ def setup_all_sheets(spreadsheet_id: str):
         (TAB_DASHBOARD,      ["Dashboard — E-Ticaret Otomasyon Pipeline"]),
     ]
     service = get_sheets_service()
-    for tab, header in tabs:
-        range_name = f"'{tab}'!A1"
-        existing = service.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id, range=f"'{tab}'!A1:A1"
+
+    # 1. Mevcut sekmeleri öğren
+    spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    existing_titles = {s["properties"]["title"] for s in spreadsheet.get("sheets", [])}
+
+    # 2. Eksik sekmeleri oluştur (batchUpdate)
+    missing = [t for t, _ in required_tabs if t not in existing_titles]
+    if missing:
+        requests_body = [
+            {"addSheet": {"properties": {"title": tab_name}}}
+            for tab_name in missing
+        ]
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": requests_body},
         ).execute()
-        first_cell = existing.get("values", [[""]])[0][0] if existing.get("values") else ""
-        if not first_cell:
-            body = {"values": [header]}
-            service.spreadsheets().values().update(
-                spreadsheetId=spreadsheet_id,
-                range=range_name,
-                valueInputOption="USER_ENTERED",
-                body=body,
+
+    # 3. Header satırlarını yaz (boşsa)
+    for tab, header in required_tabs:
+        try:
+            existing = service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id, range=f"'{tab}'\!A1:A1"
             ).execute()
+            first_cell = (
+                existing.get("values", [[""]])[0][0]
+                if existing.get("values") else ""
+            )
+            if not first_cell:
+                service.spreadsheets().values().update(
+                    spreadsheetId=spreadsheet_id,
+                    range=f"'{tab}'\!A1",
+                    valueInputOption="USER_ENTERED",
+                    body={"values": [header]},
+                ).execute()
+        except Exception as e:
+            pass  # sekme henüz indexlenmemiş olabilir, bir sonraki cron'da tekrar dener
 
 
 # ── Sheet 1: Ürün Onay ────────────────────────────────────────────────────────
