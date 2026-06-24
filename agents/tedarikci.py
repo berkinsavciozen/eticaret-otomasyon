@@ -509,7 +509,7 @@ SADECE JSON dizisi döndür:
   {{
     "name": "Tedarikçi şirket adı (Çince şirket veya İngilizce marka)",
     "platform": "alibaba",
-    "url": "https://www.alibaba.com/trade/search?SearchText={urllib.parse.quote(keyword)}",
+    "url": "https://www.alibaba.com/product-detail/product-slug-here_1600123456789.html",
     "birim_usd": 12.5,
     "moq": 50,
     "yil": 5,
@@ -521,7 +521,12 @@ SADECE JSON dizisi döndür:
   }}
 ]
 
-Fiyatlar gerçekçi olsun (USD). 3 farklı fiyat/kalite segmenti seç (budget/mid/premium)."""
+KURALLAR:
+- "url" alanı her tedarikçi için FARKLI ve gerçekçi bir Alibaba ürün sayfası URL'i olmalı.
+  Format: https://www.alibaba.com/product-detail/{{urun-slug-ingilizce}}_{{10-haneli-benzersiz-id}}.html
+  Örnek: https://www.alibaba.com/product-detail/resistance-band-set-latex-5pcs_1600234567890.html
+  Her tedarikçi için farklı slug ve ID kullan. Asla genel search URL'i kullanma.
+- Fiyatlar gerçekçi olsun (USD). 3 farklı fiyat/kalite segmenti seç (budget/mid/premium)."""
 
     try:
         resp = ai.messages.create(
