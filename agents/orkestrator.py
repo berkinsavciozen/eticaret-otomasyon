@@ -176,9 +176,27 @@ def _process_tedarikci_approvals(sheet_id: str) -> tuple:
 
     # Şu an tedarikçi approval'ları Supabase'de ayrı tablo yok (M4 kapsam).
     # Sadece sayıyı log'la.
-    if approved_list:
-        logger.info(f"{len(approved_list)} tedarikçi onaylandı (Supabase sync M4'te)")
-    return len(approved_list), len(rejected_list)
+    client = get_client()
+    approved_count = 0
+    for item in approved_list:
+        try:
+            client.table("supplier_contacts").update({
+                "status": "approved",
+            }).eq("id", item["id"]).execute()
+            approved_count += 1
+            logger.info(f"Tedarikçi onaylandı (Supabase): {item.get('id')}")
+        except Exception as e:
+            logger.warning(f"Tedarikçi onay Supabase hatası: {e}")
+
+    for item in rejected_list:
+        try:
+            client.table("supplier_contacts").update({
+                "status": "rejected",
+            }).eq("id", item["id"]).execute()
+        except Exception as e:
+            logger.warning(f"Tedarikçi red Supabase hatası: {e}")
+
+    return approved_count, len(rejected_list)
 
 
 # ── Sheet 3: Mail Onay işleme ─────────────────────────────────────────────────
