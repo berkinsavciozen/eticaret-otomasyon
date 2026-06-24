@@ -23,7 +23,7 @@ logger = get_logger("firsatci")
 AGENT_NAME = "firsatci"
 
 # ── Puanlama sabitleri ────────────────────────────────────────────────────────
-SCORE_THRESHOLD = 60          # approval_queue'ya girebilmek için minimum skor
+SCORE_THRESHOLD = 45          # approval_queue'ya girebilmek için minimum skor
 REJECTED_CONVERT_DELTA = 20   # Red edilen ürün bu kadar skor artarsa pending'e çevrilir
 
 # ── Sermaye limiti ────────────────────────────────────────────────────────────
@@ -621,8 +621,13 @@ def _get_pytrends_score(keyword: str) -> Tuple[int, int]:
         return pt_score, rq_score
 
     except Exception as e:
+        err = str(e)
+        if "429" in err or "Too Many" in err:
+            # Rate-limited: Google VARLIĞINI biliyor, sadece engelliyor
+            logger.warning(f"pytrends '{keyword}' rate-limited (429), iyi default kullanılıyor")
+            return 14, 6
         logger.warning(f"pytrends '{keyword}' hatası: {e}")
-        return 8, 4  # Makul default (eşiği geçmemek için düşük)
+        return 8, 4
 
 
 def _get_social_score(keyword: str) -> int:
@@ -715,8 +720,13 @@ def _get_trendyol_data(
         return total, talep, fiyat_via
 
     except Exception as e:
+        err = str(e)
+        if "Name or service not known" in err or "NewConnectionError" in err or "Failed to establish" in err:
+            # DNS/ağ erişim sorunu — pazar hakkında bilgi yok ama yok da değil
+            logger.warning(f"Trendyol '{keyword}' DNS/ağ hatası, nötr default kullanılıyor")
+            return 0, 14, 11  # listing bilinmiyor, talep+fiyat nötr-iyi
         logger.warning(f"Trendyol '{keyword}' hatası: {e}")
-        return 0, 10, 8  # makul fallback
+        return 0, 10, 8
 
 
 def _get_feasibility_score(
