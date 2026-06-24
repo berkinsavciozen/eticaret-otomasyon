@@ -350,7 +350,7 @@ def _phase3_send_real_mails(sheet_id: Optional[str]) -> int:
                 update_mail_onay_status(
                     sheet_id,
                     mail_item["row_num"],
-                    status="approved",
+                    status="sent",
                     gercek_gonderim=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
                 )
             except Exception as e:

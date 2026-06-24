@@ -506,7 +506,7 @@ def check_mail_onay_approvals(spreadsheet_id: str) -> List[Dict[str, Any]]:
         excel_ok  = row[M_EXCEL_ONAY].strip().upper() if len(row) > M_EXCEL_ONAY else ""
         gmail_ok  = row[M_GMAIL_ONAY].strip() if len(row) > M_GMAIL_ONAY else ""
         mevcut    = row[M_ONAY_DURUMU].strip().lower() if len(row) > M_ONAY_DURUMU else ""
-        if mevcut != "pending":
+        if mevcut not in ("pending", "approved"):
             continue
         if excel_ok == "ONAY" or gmail_ok:
             approved.append({
