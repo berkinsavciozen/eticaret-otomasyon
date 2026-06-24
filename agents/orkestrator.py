@@ -7,25 +7,21 @@ import time
 from datetime import datetime, timezone
 from core.supabase_client import get_client
 from core.logger import get_logger, log_run
-from core.sheets_client import clear_and_write_sheet, read_sheet
+from core.sheets_client import (
+    setup_all_sheets,
+    mirror_urun_onay,
+    process_urun_onay_approvals,
+    process_tedarikci_onay_approvals,
+    check_mail_onay_approvals,
+    update_mail_onay_status,
+    process_proforma_approvals,
+    refresh_dashboard,
+    get_gmail_service,
+)
 
 logger = get_logger("orkestrator")
 
 AGENT_NAME = "orkestrator"
-
-# Sheets kolon indeksleri (0-based)
-COL_ID = 0
-COL_TYPE = 1
-COL_TITLE = 2
-COL_SUMMARY = 3
-COL_AGENT = 4
-COL_STATUS = 5
-COL_CREATED = 6
-COL_NOTE = 7
-
-SHEETS_HEADER = [
-    "ID", "Tip", "Başlık", "Özet", "Agent", "Durum", "Oluşturulma", "Onay Notu"
-]
 
 
 def run():
@@ -33,21 +29,37 @@ def run():
     logger.info("Orkestratör başladı")
 
     try:
-        # 1. Sheets'teki onayları önce işle (Berkin'in değişiklikleri Supabase'e yansısın)
-        approved, rejected = _process_sheet_approvals()
+        sheet_id = os.getenv("SHEETS_APPROVAL_QUEUE_ID")
 
-        # 2. Bekleyen onayları say (bildirim için)
-        pending_count = _check_pending_approvals()
+        # 0. İlk çalışmada sekme başlıklarını oluştur
+        if sheet_id:
+            try:
+                setup_all_sheets(sheet_id)
+            except Exception as e:
+                logger.warning(f"setup_all_sheets atlandı: {e}")
 
-        # 3. Sheets'i Supabase'den tazele (güncel durumu yaz)
-        _mirror_approval_queue_to_sheets()
+        # 1. Sheets'teki onayları önce işle → Supabase'e yansısın
+        urun_approved, urun_rejected = _process_urun_approvals(sheet_id)
+        tedarikci_approved, _ = _process_tedarikci_approvals(sheet_id)
+        mail_approved = _process_mail_approvals(sheet_id)
+        proforma_approved, _ = _process_proforma_approvals_step(sheet_id)
 
-        # 4. Agent sağlık kontrolü
+        # 2. Bekleyen onayları say
+        pending_counts = _check_pending_approvals()
+
+        # 3. Sheet 1'i Supabase'den tazele
+        _mirror_urun_onay_to_sheets(sheet_id)
+
+        # 4. Dashboard güncelle
+        _refresh_dashboard_step(sheet_id, pending_counts)
+
+        # 5. Agent sağlık kontrolü
         _check_agent_health()
 
-        # 5. Bekleyen onay varsa Gmail bildirimi
-        if pending_count > 0:
-            _send_gmail_reminder(pending_count)
+        # 6. Bekleyen onay varsa Gmail bildirimi
+        total_pending = sum(pending_counts.values())
+        if total_pending > 0:
+            _send_gmail_reminder(pending_counts)
 
         duration_ms = int((time.time() - start) * 1000)
         log_run(
@@ -55,9 +67,21 @@ def run():
             status="success",
             run_type="cron",
             duration_ms=duration_ms,
-            metadata={"approved": approved, "rejected": rejected, "pending": pending_count},
+            metadata={
+                "urun_approved": urun_approved,
+                "urun_rejected": urun_rejected,
+                "tedarikci_approved": tedarikci_approved,
+                "mail_approved": mail_approved,
+                "proforma_approved": proforma_approved,
+                "pending": pending_counts,
+            },
         )
-        logger.info(f"Orkestratör tamamlandı ({duration_ms}ms) — onaylanan: {approved}, reddedilen: {rejected}")
+        logger.info(
+            f"Orkestratör tamamlandı ({duration_ms}ms) — "
+            f"ürün onay: {urun_approved}, red: {urun_rejected} | "
+            f"tedarikçi: {tedarikci_approved} | mail: {mail_approved} | "
+            f"proforma: {proforma_approved}"
+        )
 
     except Exception as e:
         duration_ms = int((time.time() - start) * 1000)
@@ -67,76 +91,65 @@ def run():
         raise
 
 
-def _process_sheet_approvals() -> tuple:
-    """
-    Sheets'teki Durum kolonunu okur.
-    'approved' veya 'rejected' olan satırları Supabase'e yansıtır.
-    Onaylananları products tablosuna ekler.
-    """
-    sheet_id = os.getenv("SHEETS_APPROVAL_QUEUE_ID")
+# ── Sheet 1: Ürün Onay işleme ─────────────────────────────────────────────────
+
+def _process_urun_approvals(sheet_id: str) -> tuple:
+    """Sheet 1'deki onay/red kararlarını Supabase'e yansıtır."""
     if not sheet_id:
         return 0, 0
 
     try:
-        rows = read_sheet(sheet_id, "Onay Kuyruğu!A1:H200")
+        approved_list, rejected_list = process_urun_onay_approvals(sheet_id)
     except Exception as e:
-        logger.warning(f"Sheets okunamadı: {e}")
+        logger.warning(f"Sheet 1 okunamadı: {e}")
         return 0, 0
 
-    if len(rows) <= 1:  # sadece header veya boş
-        return 0, 0
-
+    client = get_client()
     approved_count = 0
     rejected_count = 0
-    client = get_client()
 
-    for row in rows[1:]:  # header'ı atla
-        if len(row) <= COL_STATUS:
-            continue
-
-        row_id = row[COL_ID] if len(row) > COL_ID else ""
-        sheet_status = row[COL_STATUS].strip().lower() if len(row) > COL_STATUS else ""
-        decision_note = row[COL_NOTE].strip() if len(row) > COL_NOTE else ""
-
-        if not row_id or sheet_status not in ("approved", "rejected"):
-            continue
-
-        # Supabase'deki mevcut durumu kontrol et
+    for item in approved_list:
+        row_id = item["id"]
         try:
             result = client.table("approval_queue").select("id, status").eq("id", row_id).execute()
-        except Exception:
-            continue
-
-        if not result.data:
-            continue
-
-        current_status = result.data[0].get("status", "")
-        if current_status != "pending":
-            continue  # zaten işlenmiş
-
-        # approval_queue güncelle
-        client.table("approval_queue").update({
-            "status": sheet_status,
-            "decision_note": decision_note,
-        }).eq("id", row_id).execute()
-
-        if sheet_status == "approved":
-            _create_product_from_approval(result.data[0]["id"], row, client)
+            if not result.data or result.data[0].get("status") != "pending":
+                continue
+            client.table("approval_queue").update({
+                "status": "approved",
+                "decision_note": item.get("note", ""),
+            }).eq("id", row_id).execute()
+            _create_product_from_approval(row_id, client)
             approved_count += 1
-            logger.info(f"Onaylandı ve products'a eklendi: {row[COL_TITLE] if len(row) > COL_TITLE else row_id}")
-        else:
+            logger.info(f"Ürün onaylandı: {row_id}")
+        except Exception as e:
+            logger.error(f"Ürün onay hatası {row_id}: {e}")
+
+    for item in rejected_list:
+        row_id = item["id"]
+        try:
+            result = client.table("approval_queue").select("id, status").eq("id", row_id).execute()
+            if not result.data or result.data[0].get("status") != "pending":
+                continue
+            client.table("approval_queue").update({
+                "status": "rejected",
+                "decision_note": item.get("note", ""),
+            }).eq("id", row_id).execute()
             rejected_count += 1
-            logger.info(f"Reddedildi: {row[COL_TITLE] if len(row) > COL_TITLE else row_id}")
+            logger.info(f"Ürün reddedildi: {row_id}")
+        except Exception as e:
+            logger.error(f"Ürün red hatası {row_id}: {e}")
 
     return approved_count, rejected_count
 
 
-def _create_product_from_approval(approval_id: str, row: list, client):
+def _create_product_from_approval(approval_id: str, client):
     """Onaylanan approval_queue kaydından products tablosuna kayıt oluşturur."""
-    title = row[COL_TITLE] if len(row) > COL_TITLE else "Bilinmeyen ürün"
-    request_type = row[COL_TYPE] if len(row) > COL_TYPE else ""
+    result = client.table("approval_queue").select("*").eq("id", approval_id).execute()
+    if not result.data:
+        return
+    r = result.data[0]
+    title = r.get("title", "Bilinmeyen ürün")
 
-    # Aynı başlıkta ürün zaten varsa ekleme
     existing = client.table("products").select("id").eq("name", title).execute()
     if existing.data:
         logger.info(f"products'ta zaten var, atlandı: {title}")
@@ -145,29 +158,83 @@ def _create_product_from_approval(approval_id: str, row: list, client):
     client.table("products").insert({
         "name": title,
         "status": "approved",
-        "category": request_type,
+        "category": r.get("category", ""),
     }).execute()
 
 
-def _check_pending_approvals() -> int:
-    client = get_client()
-    pending = (
-        client.table("approval_queue")
-        .select("id, status")
-        .eq("status", "pending")
-        .execute()
-    )
-    count = len(pending.data)
-    if count > 0:
-        logger.info(f"{count} bekleyen onay var")
-    else:
-        logger.info("Bekleyen onay yok")
-    return count
+# ── Sheet 2: Tedarikçi Onay işleme ───────────────────────────────────────────
+
+def _process_tedarikci_approvals(sheet_id: str) -> tuple:
+    """Sheet 2'deki tedarikçi onaylarını işler."""
+    if not sheet_id:
+        return 0, 0
+    try:
+        approved_list, rejected_list = process_tedarikci_onay_approvals(sheet_id)
+    except Exception as e:
+        logger.warning(f"Sheet 2 okunamadı: {e}")
+        return 0, 0
+
+    # Şu an tedarikçi approval'ları Supabase'de ayrı tablo yok (M4 kapsam).
+    # Sadece sayıyı log'la.
+    if approved_list:
+        logger.info(f"{len(approved_list)} tedarikçi onaylandı (Supabase sync M4'te)")
+    return len(approved_list), len(rejected_list)
 
 
-def _mirror_approval_queue_to_sheets():
-    """approval_queue tablosunu Google Sheets'e yazar."""
-    sheet_id = os.getenv("SHEETS_APPROVAL_QUEUE_ID")
+# ── Sheet 3: Mail Onay işleme ─────────────────────────────────────────────────
+
+def _process_mail_approvals(sheet_id: str) -> int:
+    """Sheet 3'te onaylanan test maillerini gerçek tedarikçiye gönderir."""
+    if not sheet_id:
+        return 0
+
+    try:
+        approved_mails = check_mail_onay_approvals(sheet_id)
+    except Exception as e:
+        logger.warning(f"Sheet 3 okunamadı: {e}")
+        return 0
+
+    sent_count = 0
+    for mail in approved_mails:
+        try:
+            # TODO M4: Gerçek tedarikçi mail gönderimi (tedarikci agent'a devret)
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            update_mail_onay_status(
+                sheet_id,
+                mail["row_num"],
+                status="approved",
+                gercek_gonderim=now_str,
+                note="Onay alındı — gerçek gönderim M4'te aktif olacak",
+            )
+            logger.info(f"Mail onaylandı: {mail.get('tm_id')} — {mail.get('product_title')}")
+            sent_count += 1
+        except Exception as e:
+            logger.error(f"Mail onay güncelleme hatası: {e}")
+
+    return sent_count
+
+
+# ── Sheet 4: Proforma Onay işleme ────────────────────────────────────────────
+
+def _process_proforma_approvals_step(sheet_id: str) -> tuple:
+    """Sheet 4'teki proforma onaylarını işler."""
+    if not sheet_id:
+        return 0, 0
+    try:
+        approved_list, rejected_list = process_proforma_approvals(sheet_id)
+    except Exception as e:
+        logger.warning(f"Sheet 4 okunamadı: {e}")
+        return 0, 0
+
+    if approved_list:
+        logger.info(f"{len(approved_list)} proforma onaylandı (sipariş akışı M4'te)")
+    return len(approved_list), len(rejected_list)
+
+
+# ── Sheet 1 mirror ────────────────────────────────────────────────────────────
+
+def _mirror_urun_onay_to_sheets(sheet_id: str):
+    """approval_queue tablosunu Sheet 1'e yazar (tüm statüler)."""
     if not sheet_id:
         logger.info("SHEETS_APPROVAL_QUEUE_ID tanımlı değil, mirror atlandı")
         return
@@ -177,25 +244,70 @@ def _mirror_approval_queue_to_sheets():
         client.table("approval_queue")
         .select("*")
         .order("created_at", desc=True)
-        .limit(100)
+        .limit(200)
         .execute()
     )
 
-    values = [SHEETS_HEADER]
-    for r in rows.data:
-        values.append([
-            str(r.get("id", "")),
-            r.get("request_type", ""),
-            r.get("title", ""),
-            r.get("summary", ""),
-            r.get("agent_source", ""),
-            r.get("status", ""),
-            str(r.get("created_at", "")),
-            r.get("decision_note", "") or "",
-        ])
+    count = mirror_urun_onay(sheet_id, rows.data)
+    logger.info(f"Sheet 1 mirror: {count} kayıt yazıldı")
 
-    clear_and_write_sheet(sheet_id, "Onay Kuyruğu!A1", values)
-    logger.info(f"Sheets mirror: {len(rows.data)} kayıt yazıldı")
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+
+def _refresh_dashboard_step(sheet_id: str, pending_counts: dict):
+    """Sheet 5 Dashboard'u günceller."""
+    if not sheet_id:
+        return
+
+    client = get_client()
+    try:
+        # Ürün pipeline sayıları
+        all_q = client.table("approval_queue").select("status").execute()
+        urun_pending  = sum(1 for r in all_q.data if r["status"] == "pending")
+        urun_approved = sum(1 for r in all_q.data if r["status"] == "approved")
+        urun_rejected = sum(1 for r in all_q.data if r["status"] == "rejected")
+
+        pipeline_data = {
+            "urun_pending":       urun_pending,
+            "urun_approved":      urun_approved,
+            "urun_rejected":      urun_rejected,
+            "tedarikci_pending":  pending_counts.get("tedarikci", 0),
+            "tedarikci_approved": 0,
+            "mail_pending":       pending_counts.get("mail", 0),
+            "mail_approved":      0,
+            "proforma_pending":   pending_counts.get("proforma", 0),
+            "proforma_approved":  0,
+            "last_updated":       datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            "product_supplier_matrix": [],  # M4'te tedarikci verisiyle dolar
+        }
+        refresh_dashboard(sheet_id, pipeline_data)
+        logger.info("Dashboard güncellendi")
+    except Exception as e:
+        logger.warning(f"Dashboard güncelleme hatası: {e}")
+
+
+# ── Pending approval sayıları ─────────────────────────────────────────────────
+
+def _check_pending_approvals() -> dict:
+    client = get_client()
+    pending = (
+        client.table("approval_queue")
+        .select("id")
+        .eq("status", "pending")
+        .execute()
+    )
+    count = len(pending.data)
+    counts = {
+        "urun": count,
+        "tedarikci": 0,  # M4'te dolar
+        "mail": 0,       # M4'te dolar
+        "proforma": 0,   # M4'te dolar
+    }
+    if count > 0:
+        logger.info(f"{count} bekleyen ürün onayı var")
+    else:
+        logger.info("Bekleyen onay yok")
+    return counts
 
 
 def _check_agent_health():
@@ -210,7 +322,9 @@ def _check_agent_health():
     logger.info(f"Son {len(recent.data)} log kaydı kontrol edildi")
 
 
-def _send_gmail_reminder(pending_count: int):
+# ── Gmail bildirimi ───────────────────────────────────────────────────────────
+
+def _send_gmail_reminder(pending_counts: dict):
     """Bekleyen onaylar için Gmail bildirimi gönderir."""
     notification_email = os.getenv("NOTIFICATION_EMAIL")
     if not notification_email:
@@ -220,25 +334,35 @@ def _send_gmail_reminder(pending_count: int):
     try:
         import base64
         from email.mime.text import MIMEText
-        from core.sheets_client import get_gmail_service
 
-        sheet_id = os.getenv("SHEETS_APPROVAL_QUEUE_ID", "")
+        sheet_id  = os.getenv("SHEETS_APPROVAL_QUEUE_ID", "")
         sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}" if sheet_id else ""
 
+        lines = []
+        if pending_counts.get("urun"):
+            lines.append(f"• Ürün Onay: {pending_counts['urun']} bekleyen")
+        if pending_counts.get("tedarikci"):
+            lines.append(f"• Tedarikçi Onay: {pending_counts['tedarikci']} bekleyen")
+        if pending_counts.get("mail"):
+            lines.append(f"• Mail Onay: {pending_counts['mail']} bekleyen")
+        if pending_counts.get("proforma"):
+            lines.append(f"• Proforma Onay: {pending_counts['proforma']} bekleyen")
+
+        total = sum(pending_counts.values())
         body = f"""Merhaba,
 
-{pending_count} adet onay bekleyen kayıt var.
+{total} adet onay bekleyen kayıt var:
 
-Onay paneline gitmek için:
+{chr(10).join(lines)}
+
+Onay paneline git:
 {sheet_url}
-
-Onaylamak için "Durum" kolonunu "approved", reddetmek için "rejected" yap.
 
 — E-Ticaret Otomasyon Sistemi
 """
         message = MIMEText(body)
         message["to"] = notification_email
-        message["subject"] = f"[E-Ticaret] {pending_count} onay bekliyor"
+        message["subject"] = f"[E-Ticaret] {total} onay bekliyor"
 
         service = get_gmail_service()
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
