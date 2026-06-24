@@ -301,7 +301,7 @@ def setup_all_sheets(spreadsheet_id: str):
     for tab, header in required_tabs:
         try:
             existing = service.spreadsheets().values().get(
-                spreadsheetId=spreadsheet_id, range=f"'{tab}'\!A1:A1"
+                spreadsheetId=spreadsheet_id, range=f"'{tab}'!A1:A1"
             ).execute()
             first_cell = (
                 existing.get("values", [[""]])[0][0]
@@ -310,7 +310,7 @@ def setup_all_sheets(spreadsheet_id: str):
             if not first_cell:
                 service.spreadsheets().values().update(
                     spreadsheetId=spreadsheet_id,
-                    range=f"'{tab}'\!A1",
+                    range=f"'{tab}'!A1",
                     valueInputOption="USER_ENTERED",
                     body={"values": [header]},
                 ).execute()
