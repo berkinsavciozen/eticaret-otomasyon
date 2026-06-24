@@ -178,8 +178,12 @@ def _process_tedarikci_approvals(sheet_id: str) -> tuple:
     # Sadece sayıyı log'la.
     client = get_client()
     approved_count = 0
+    ALREADY_PROCESSED = {"inquiry_sent", "followup_sent", "completed", "sent"}
     for item in approved_list:
         try:
+            res = client.table("supplier_contacts").select("status").eq("id", item["id"]).execute()
+            if res.data and res.data[0].get("status") in ALREADY_PROCESSED:
+                continue  # zaten ilerledi, üzerine yazma
             client.table("supplier_contacts").update({
                 "status": "approved",
             }).eq("id", item["id"]).execute()
@@ -285,18 +289,35 @@ def _refresh_dashboard_step(sheet_id: str, pending_counts: dict):
         urun_approved = sum(1 for r in all_q.data if r["status"] == "approved")
         urun_rejected = sum(1 for r in all_q.data if r["status"] == "rejected")
 
+        # Tedarikçi sayıları
+        all_sc = client.table("supplier_contacts").select("status, supplier_name, product_id").execute()
+        tedarikci_pending  = sum(1 for r in all_sc.data if r["status"] in ("research_found",))
+        tedarikci_approved = sum(1 for r in all_sc.data if r["status"] in ("approved", "inquiry_sent", "followup_sent"))
+
+        # Ürün × Tedarikçi matrisi
+        products_res = client.table("products").select("id, name").execute()
+        prod_map = {p["id"]: p["name"] for p in products_res.data}
+        matrix = []
+        for sc in all_sc.data:
+            matrix.append({
+                "product":  prod_map.get(sc.get("product_id"), sc.get("product_id", "")),
+                "supplier": sc.get("supplier_name", ""),
+                "status":   sc.get("status", ""),
+                "score":    "",
+            })
+
         pipeline_data = {
             "urun_pending":       urun_pending,
             "urun_approved":      urun_approved,
             "urun_rejected":      urun_rejected,
-            "tedarikci_pending":  pending_counts.get("tedarikci", 0),
-            "tedarikci_approved": 0,
-            "mail_pending":       pending_counts.get("mail", 0),
+            "tedarikci_pending":  tedarikci_pending,
+            "tedarikci_approved": tedarikci_approved,
+            "mail_pending":       0,
             "mail_approved":      0,
-            "proforma_pending":   pending_counts.get("proforma", 0),
+            "proforma_pending":   0,
             "proforma_approved":  0,
             "last_updated":       datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-            "product_supplier_matrix": [],  # M4'te tedarikci verisiyle dolar
+            "product_supplier_matrix": matrix,
         }
         refresh_dashboard(sheet_id, pipeline_data)
         logger.info("Dashboard güncellendi")
