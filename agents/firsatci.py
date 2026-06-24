@@ -257,8 +257,11 @@ def _scan_new_opportunities() -> List[Dict[str, Any]]:
         logger.info("Eşiği geçen fırsat bulunamadı, Claude fallback çalışıyor")
         return _claude_fallback_opportunities(seed_sample)
 
-    # 5. Geçen adaylar için Claude'dan özet + tahmini fiyat al
-    return _enrich_with_claude(scored_candidates)
+    # 5. Skora göre sırala, sadece top 3'ü enrich et (token tasarrufu)
+    scored_candidates.sort(key=lambda x: x["scoring"]["total"], reverse=True)
+    top_candidates = scored_candidates[:3]
+    logger.info(f"Top 3 aday Claude enrich'e gönderiliyor ({len(scored_candidates)} geçenden)")
+    return _enrich_with_claude(top_candidates)
 
 
 def _enrich_with_claude(candidates: List[Dict]) -> List[Dict]:
@@ -401,8 +404,50 @@ SADECE JSON dizisi ver:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def _run_priority_ranking() -> int:
-    """Pending approval_queue öğelerini Claude ile önceliklendirir."""
+    """
+    Pending approval_queue öğelerini Claude ile önceliklendirir.
+    Opt-3: Son ranking'ten bu yana yeni item eklenmediyse çağrı yapmaz.
+    """
     client = get_client()
+
+    # Son ranking zamanını öğren (metadata.last_ranked_at)
+    try:
+        settings_res = (
+            client.table("approval_queue")
+            .select("created_at")
+            .eq("agent_source", AGENT_NAME)
+            .eq("status", "pending")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not settings_res.data:
+            logger.info("Faz C: Pending item yok, ranking atlandı")
+            return 0
+
+        latest_item_at = settings_res.data[0]["created_at"]
+
+        # En son Claude ranking ne zamandı? metadata'dan bak
+        ranked_res = (
+            client.table("approval_queue")
+            .select("metadata")
+            .eq("agent_source", AGENT_NAME)
+            .eq("status", "pending")
+            .not_.is_("metadata->priority->rank", "null")
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if ranked_res.data:
+            last_ranked_meta = ranked_res.data[0].get("metadata") or {}
+            last_ranked_at = last_ranked_meta.get("priority", {}).get("ranked_at", "")
+            if last_ranked_at and last_ranked_at >= latest_item_at:
+                logger.info("Faz C: Yeni item yok, ranking atlandı (token tasarrufu)")
+                return 0
+
+    except Exception as e:
+        logger.warning(f"Faz C: Ranking check hatası (devam ediliyor): {e}")
+
     try:
         result = (
             client.table("approval_queue")
@@ -483,8 +528,9 @@ SADECE JSON dizisi döndür (tüm öğeleri dahil et):
                 continue
             meta = res.data[0].get("metadata") or {}
             meta["priority"] = {
-                "rank":   entry.get("rank", 99),
-                "reason": entry.get("reason", ""),
+                "rank":     entry.get("rank", 99),
+                "reason":   entry.get("reason", ""),
+                "ranked_at": datetime.now(timezone.utc).isoformat(),
             }
             client.table("approval_queue").update({"metadata": meta}).eq("id", item_id).execute()
             updated += 1
