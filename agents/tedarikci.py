@@ -1,7 +1,7 @@
 # Tedarikçi Agent — M4
 # Görev: Onaylanan ürünler için tedarikçi araştırması (Alibaba scraping),
 #         ürün×tedarikçi Sheet 2'ye yazma, TM-ID test maili, Sheet 3 onay akışı.
-# Çalışma sıklığı: Günde 1 kez (Railway cron: 0 7 * * *)
+# Çalışma sıklığı: Saatte 1 kez (Railway cron: 0 * * * *)
 #
 # Akış:
 #   Faz 1: Alibaba scraping → supplier_contacts (Supabase) + Sheet 2 (Tedarikçi Onay)

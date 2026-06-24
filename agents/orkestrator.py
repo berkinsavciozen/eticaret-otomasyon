@@ -1,6 +1,6 @@
 # Orkestratör Agent
 # Görev: Diğer agentları tetikler, approval_queue'yu yönetir, sistem sağlığını kontrol eder.
-# Çalışma sıklığı: Her 15 dakikada bir (Railway cron)
+# Çalışma sıklığı: Her 30 dakikada bir (Railway cron)
 
 import os
 import time
