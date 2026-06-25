@@ -501,7 +501,7 @@ def mirror_tedarikci_onay(spreadsheet_id: str, rows_data: List[Dict[str, Any]]):
     Supabase status → Türkçe Durum eşlemesi yapar.
     """
     STATUS_MAP = {
-        "research_found": "pending",
+        "research_found": "beklemede",
         "approved":       "onaylandı",
         "inquiry_sent":   "mail gönderildi",
         "followup_sent":  "takip gönderildi",
@@ -568,7 +568,7 @@ def upsert_tedarikci_onay(spreadsheet_id: str, row_data: Dict[str, Any]):
         str(scoring.get("fiyat", "")),
         str(scoring.get("teslimat", "")),
         str(scoring.get("feedback", "")),
-        row_data.get("durum", "pending"),
+        row_data.get("durum", "beklemede"),
         row_data.get("not", ""),
         str(row_data.get("tarih", "")),
     ]
@@ -694,7 +694,7 @@ def append_proforma_onay(spreadsheet_id: str, row_data: Dict[str, Any]):
         str(cogs or ""),
         str(row_data.get("tahmini_marj_pct", "")),
         str(fark),
-        row_data.get("durum", "pending"),
+        row_data.get("durum", "beklemede"),
         row_data.get("not", ""),
         str(row_data.get("tarih", "")),
     ]
@@ -708,6 +708,9 @@ def process_proforma_approvals(spreadsheet_id: str) -> tuple:
     except Exception:
         return [], []
 
+    APPROVED_VALUES = {"approved", "onay", "onaylandı"}
+    REJECTED_VALUES = {"rejected", "red", "reddedildi"}
+
     approved, rejected = [], []
     for row in rows[1:]:
         if len(row) <= P_DURUM:
@@ -715,9 +718,9 @@ def process_proforma_approvals(spreadsheet_id: str) -> tuple:
         row_id = row[P_ID].strip() if len(row) > P_ID else ""
         status  = row[P_DURUM].strip().lower() if len(row) > P_DURUM else ""
         note    = row[P_NOT].strip() if len(row) > P_NOT else ""
-        if not row_id or status not in ("approved", "rejected"):
+        if not row_id or status not in (APPROVED_VALUES | REJECTED_VALUES):
             continue
-        if status == "approved":
+        if status in APPROVED_VALUES:
             approved.append({"id": row_id, "note": note,
                              "product_id": row[P_URUN_ID] if len(row) > P_URUN_ID else ""})
         else:
