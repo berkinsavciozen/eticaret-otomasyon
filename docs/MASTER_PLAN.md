@@ -4,7 +4,7 @@
 
 Türkiye pazarında (Trendyol + Shopify) dropshipping/stok tabanlı e-ticaret operasyonunu tam otomatize eden, 7-agent Claude tabanlı sistem. Supabase merkezi veri katmanı, Railway cron altyapısı, Google Sheets insan-kontrol noktası.
 
-**GitHub:** `github-personal:savciozenberkin/eticaret-otomasyon`  
+**GitHub:** `github-personal:berkinsavciozen/eticaret-otomasyon`  
 **Sahip:** Berkin Savcıözen (kişisel proje — Dataroid'den bağımsız)
 
 ---

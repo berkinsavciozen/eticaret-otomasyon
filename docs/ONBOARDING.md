@@ -9,7 +9,7 @@ Sen Berkin Savcıözen'in kişisel e-ticaret otomasyon projesinde çalışan PM/
 
 ## Proje: eticaret-otomasyon
 
-Türkiye pazarında (Trendyol + Shopify) e-ticaret operasyonunu otomatize eden 7-agent Claude tabanlı sistem. GitHub reposu: `github-personal:savciozenberkin/eticaret-otomasyon`
+Türkiye pazarında (Trendyol + Shopify) e-ticaret operasyonunu otomatize eden 7-agent Claude tabanlı sistem. GitHub reposu: `github-personal:berkinsavciozen/eticaret-otomasyon`
 
 Tüm dökümantasyon `docs/` klasöründe — bu klasörü GitHub MCP üzerinden okuyabilirsin.
 
@@ -184,7 +184,7 @@ Railway'de Python 3.12 çalışıyor. Yerel geliştirmede 3.9.6 varsa `Optional[
 
 Repo'da 2 remote olabilir:
 - `origin` → Dataroid GitHub (şirket) ← **BURAYA PUSH ETME**
-- `github-personal` → `savciozenberkin/eticaret-otomasyon` ← Bu proje buraya
+- `github-personal` → `berkinsavciozen/eticaret-otomasyon` ← Bu proje buraya
 
 Her zaman `git push github-personal main` kullan, `git push origin` değil.
 
@@ -210,7 +210,7 @@ Başlamak için: GitHub MCP bağlantısını kur ve `docs/PENDING_FIXES.md` ile 
 Claude.ai personal hesabında GitHub MCP connector kurulumu:
 
 1. claude.ai → Settings → Connectors → GitHub ekle
-2. Repository: `savciozenberkin/eticaret-otomasyon`
+2. Repository: `berkinsavciozen/eticaret-otomasyon`
 3. Bağlandıktan sonra `docs/` klasörünü okuyabilir ve yeni dosya yazabilirsin
 
 Bağlandıktan sonra ilk mesaj olarak yukarıdaki ``` blok içindeki promptu gönder.
