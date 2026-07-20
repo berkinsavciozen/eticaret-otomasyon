@@ -30,14 +30,13 @@ Tüm dökümantasyon `docs/` klasöründe — bu klasörü GitHub MCP üzerinden
 
 ### 7 Agent
 
-```
 [Fırsatçı] ──onay──► [Tedarikçi] ──proforma──► [Listeleme]
                                                       │
                                            ┌──────────┴──────────┐
                                   [Pazarlama]           [Sipariş]
                                            └──────► [Finans] ◄───┘
                                 [Orkestratör] ◄── tümünü koordine eder
-```
+
 
 Agentlar birbirini doğrudan çağırmaz — Supabase tabloları üzerinden iletişir.
 
@@ -107,7 +106,7 @@ Bekleyen kullanıcı aksiyonları:
    ALTER TABLE preferred_suppliers ENABLE ROW LEVEL SECURITY;
    ALTER TABLE ad_campaigns ENABLE ROW LEVEL SECURITY;
    ALTER TABLE supplier_contacts ENABLE ROW LEVEL SECURITY;
-   ```
+
 4. **Healthchecks.io period → 35 dakika** (30dk cron + 5dk buffer)
 5. **Railway Hobby plan karar** ($5/ay — trial sona eriyor)
 
@@ -120,7 +119,6 @@ Fix:
 # _phase1_supplier_research() içinde, upsert_tedarikci_onay çağrısında:
 "durum": "pending"   # ← BUNU
 "durum": "beklemede" # ← BUNA değiştir
-```
 
 **BUG-2:** Orkestratör `_refresh_dashboard_step()` → `mail_pending` ve `proforma_pending` hardcoded 0 döndürüyor.
 
@@ -130,7 +128,7 @@ Fix:
 
 ## KOD YAPISI
 
-```
+
 eticaret-otomasyon/
 ├── main.py                    ← Entry point: AGENT_NAME'e göre agent'ı çalıştırır
 ├── agents/
@@ -149,7 +147,7 @@ eticaret-otomasyon/
 ├── requirements.txt
 ├── .env.example               ← Şablon (değerler boş)
 └── docs/                      ← Tüm dökümantasyon (bu klasör)
-```
+
 
 ### Önemli Kod Detayları
 
@@ -203,7 +201,7 @@ Bu session'da şunları yapabilirim:
 - Trendyol/Shopify API entegrasyonu kodu yazma
 
 Başlamak için: GitHub MCP bağlantısını kur ve `docs/PENDING_FIXES.md` ile başla — orada o anki öncelikler listelenmiş.
-```
+
 
 ---
 
