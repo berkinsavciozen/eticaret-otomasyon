@@ -183,7 +183,7 @@ def _phase1_supplier_research(sheet_id: Optional[str]) -> int:
                         "birim_usd":     supplier.get("birim_usd", ""),
                         "moq":           supplier.get("moq", ""),
                         "scoring":       scoring,
-                        "durum":         "pending",
+                        "durum":         "beklemede",
                         "not":           supplier.get("not", ""),
                         "tarih":         datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
                     })
