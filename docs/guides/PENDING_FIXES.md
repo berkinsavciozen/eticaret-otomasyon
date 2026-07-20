@@ -4,17 +4,6 @@
 
 ## 🔴 Kritik — Hemen Yapılacak
 
-### BUG-1: `tedarikci.py` — Explicit "pending" override
-**Dosya:** `agents/tedarikci.py` — `_phase1_supplier_research()` fonksiyonu  
-**Sorun:** `upsert_tedarikci_onay` çağrısında explicit `"durum": "pending"` geçiyor. Bu `sheets_client.py`'daki default `"beklemede"` fix'ini override ediyor ve Sheet 2 dropdown validation hatasına yol açıyor.  
-**Belirtisi:** Sheet 2'de "pending" görünüyor → "Invalid: Input must be on list" hatası  
-**Fix:**
-```python
-# tedarikci.py içinde — upsert_tedarikci_onay çağrısını bul
-# "durum": "pending"  ← BUNU DEĞİŞTİR
-# "durum": "beklemede"  ← BUNA
-```
-
 ### BUG-2: Google OAuth 7-Gün Token Expiry
 **Sorun:** Google Cloud OAuth app "Testing" modunda — refresh token'lar 7 günde bir expire oluyor.  
 **Belirti:** Railway'de `google.auth.exceptions.RefreshError: invalid_grant: Bad Request`  
@@ -113,6 +102,7 @@ Detay: `guides/TOKEN_OPTIMIZATION.md`
 
 | Fix | Commit | Tarih |
 |-----|--------|-------|
+| `tedarikci.py` — `_phase1_supplier_research()` explicit "pending" → "beklemede" (Sheet 2 dropdown fix) | `10ce1af` | Temmuz 2026 |
 | `sheets_client.py` — 4 yerde "pending" → "beklemede" | `ad07e61` | Haziran 2026 |
 | `orkestrator.py` — Sheet mirror try/except (token expiry fix) | `19aa437` | Haziran 2026 |
 | Fırsatçı Opt-3: Koşullu priority ranking | `cf662af` | Haziran 2026 |
