@@ -263,17 +263,19 @@ def _mirror_urun_onay_to_sheets(sheet_id: str):
         logger.info("SHEETS_APPROVAL_QUEUE_ID tanımlı değil, mirror atlandı")
         return
 
-    client = get_client()
-    rows = (
-        client.table("approval_queue")
-        .select("*")
-        .order("created_at", desc=True)
-        .limit(200)
-        .execute()
-    )
-
-    count = mirror_urun_onay(sheet_id, rows.data)
-    logger.info(f"Sheet 1 mirror: {count} kayıt yazıldı")
+    try:
+        client = get_client()
+        rows = (
+            client.table("approval_queue")
+            .select("*")
+            .order("created_at", desc=True)
+            .limit(200)
+            .execute()
+        )
+        count = mirror_urun_onay(sheet_id, rows.data)
+        logger.info(f"Sheet 1 mirror: {count} kayıt yazıldı")
+    except Exception as e:
+        logger.warning(f"Sheet 1 mirror atlandı (Sheets erişim hatası): {e}")
 
 
 # ── Sheet 2 mirror ────────────────────────────────────────────────────────────
