@@ -11,7 +11,7 @@
 | Sheet 1 | Ürün Onay | Supabase↔Sheet | Her 30 dk (Orkestratör) | ONAY/RED yaz |
 | Sheet 2 | Tedarikçi Onay | Supabase↔Sheet | Her 30 dk (Orkestratör) | ONAY/RED yaz |
 | Sheet 3 | Mail Onay | Tedarikçi yazar | Saatte 1 (Tedarikçi) | Onay Durumu seç |
-| Sheet 4 | Proforma | Tedarikçi (M5+) | M5+'da aktif | Fiyat onayı |
+| Sheet 4 | Proforma | Tedarikçi yazar | Saatte 1 (Tedarikçi Faz 5) | Fiyat onayı |
 | Sheet 5 | Dashboard | Orkestratör yazar | Her 30 dk | Sadece okur |
 
 ## Sheet 1 — Ürün Onay
@@ -38,8 +38,6 @@
 
 **Dropdown değerleri (P kolonu):** `beklemede`, `ONAY`, `RED`, `onaylandı`, `mail gönderildi`, `takip gönderildi`, `tamamlandı`
 
-> ⚠️ **Bilinen Bug:** Eğer Durum alanında "pending" görünüyorsa dropdown validation hatası alırsın. Bu `tedarikci.py` Phase 1'deki explicit `"durum": "pending"` geçişinden kaynaklanıyor. Fix bekleniyor — `guides/PENDING_FIXES.md`
-
 ## Sheet 3 — Mail Onay
 
 **Ne gösterir:** Test mail gönderim durumu + Gmail yanıt durumu  
@@ -58,9 +56,14 @@ Akış:
 4. Gmail'den tedarikçi yanıtı gelirse → Sheet 3 güncellenir
 5. I kolonuna `approved` yazarsan → gerçek tedarikçi maili gönderilir
 
-## Sheet 4 — Proforma (M5+)
+## Sheet 4 — Proforma
 
-**Aktif olmayan** — Tedarikçi'den proforma alındığında Tedarikçi Agent yazar.  
+**Ne gösterir:** Tedarikçi Agent Faz 5'te üretilen/çıkarılan proforma teklifleri
+(mock kontaklarda Claude Haiku ile sentetik, gerçek kontaklarda Gmail yanıtından
+çıkarılmış). Supabase karşılığı: `proforma_offers` (bkz. GAP-2, ROADMAP_TODO.md).
+**Yazan:** Tedarikçi Agent (`append_proforma_onay`)
+**Berkin aksiyonu:** K kolonu (Durum) dropdown'a ONAY veya RED yaz — onaylanınca
+ilgili ürün `sourced` durumuna geçer, tedarikçi kaydı `completed` olur.
 **Dropdown (K kolonu):** `beklemede`, `onaylandı`, `reddedildi`
 
 ## Sheet 5 — Dashboard
