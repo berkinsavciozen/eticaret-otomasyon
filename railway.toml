@@ -4,11 +4,23 @@ builder = "nixpacks"
 # Her Railway servisi kendi AGENT_NAME ve CRON_SCHEDULE değişkenini Variables'tan alır.
 # Bu sayede tek bir railway.toml tüm servisler için geçerli olur.
 #
-# Servis başına Variables'a eklenecekler:
-#   eticaret-otomasyon  → AGENT_NAME=orkestrator   (cron: */15 * * * *)
+# Gerçek servis durumu (Temmuz 2026 itibarıyla, Railway Variables'ta tanımlı):
+#   eticaret-otomasyon  → AGENT_NAME=orkestrator    (cron: 0 7,19 * * * — günde 2 kez)
+#                         NOT: Bu cron BİLEREK 30 dakikadan günde 2 kez'e düşürüldü,
+#                         çünkü gerçek tedarikçi mail gönderimi (tedarikci.py Faz 3)
+#                         henüz üretimde sürekli/agresif çalıştırılacak kadar
+#                         olgunlaşmadı. tedarikci.py Faz 3 stabilize olunca eski
+#                         sıklığa (örn. */30 * * * *) geri dönülebilir.
 #   eticaret-firsatci   → AGENT_NAME=firsatci       (cron: 0 6,18 * * *)
-#   eticaret-tedarikci  → AGENT_NAME=tedarikci      (cron: 0 7 * * *)
+#   eticaret-tedarikci  → AGENT_NAME=tedarikci      (cron: 0 * * * * — saatte bir)
 #   eticaret-operations → AGENT_NAME=operations     (cron: 0 8 * * *)
+#                         main.py → _run_operations() bu AGENT_NAME'i agents/operations.py
+#                         diye ayrı bir dosyaya değil, mevcut listeleme.py + siparis.py +
+#                         finans.py agentlarına sırayla yönlendiriyor (agents/operations.py
+#                         diye bir dosyaya ihtiyaç yok). Üçü de repo'da mevcut ve kendi
+#                         log_run success/failed kaydını bağımsız tutuyor; biri hata verirse
+#                         diğerleri yine de çalışır. Üçü de şu an Shopify/Trendyol/banka API
+#                         entegrasyonu için MOCK modda (gerçek entegrasyon M4+ kapsamında).
 
 [deploy]
 startCommand = "python main.py $AGENT_NAME"
