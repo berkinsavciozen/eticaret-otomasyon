@@ -253,7 +253,15 @@ def _handle_restock_approval_row(row: dict, item: dict, client, decision: str) -
 
 
 def _handle_return_approval_row(row: dict, item: dict, client, decision: str) -> bool:
-    """request_type='return_manual'. Bkz. GAP-13."""
+    """
+    request_type='return_manual' (GAP-13) — scripts/manual_return.py ile
+    Berkin tarafından oluşturulur, payload={'order_id':, 'product_id':,
+    'quantity':}.
+
+    ONAY: orders.status→'returned', products.stock_count quantity kadar
+    geri artırılır, financials'a negatif bir 'iade' kaydı düşer.
+    RED: approval_queue satırı 'rejected' yapılır, başka bir şey yapılmaz.
+    """
     row_id = row["id"]
     current_status = row.get("status")
     if current_status == decision:
@@ -263,7 +271,65 @@ def _handle_return_approval_row(row: dict, item: dict, client, decision: str) ->
         "status": decision,
         "decision_note": item.get("note", ""),
     }).eq("id", row_id).execute()
+
+    if decision == "approved":
+        payload = row.get("payload") or {}
+        _process_return_approval(
+            payload.get("order_id"),
+            payload.get("product_id"),
+            payload.get("quantity", 0),
+            client,
+        )
     return True
+
+
+def _process_return_approval(order_id, product_id, quantity, client):
+    """
+    GAP-13: iade onaylandığında siparişi 'returned' yapar, stoğu geri artırır
+    ve financials'a negatif bir iade kaydı düşer. financials alan adları
+    agents/finans.py._write_financials ile aynı (week_start, month, category,
+    platform, amount_tl, description, source, tax_category) — bu oturumda
+    gerçek Supabase şemasına erişilemediği için mevcut, prodüksiyonda
+    çalışan finans.py kodu ground truth kabul edildi (bkz. GAP-3).
+    """
+    if not order_id or not product_id:
+        logger.warning(f"return_manual payload eksik: order_id={order_id} product_id={product_id}")
+        return
+    quantity = quantity or 0
+
+    order_res = client.table("orders").select("id, unit_price_tl").eq("id", order_id).execute()
+    if not order_res.data:
+        logger.warning(f"İade: sipariş bulunamadı: {order_id}")
+        return
+    unit_price = order_res.data[0].get("unit_price_tl") or 0
+
+    client.table("orders").update({"status": "returned"}).eq("id", order_id).execute()
+
+    prod_res = client.table("products").select("id, name, stock_count").eq("id", product_id).execute()
+    if not prod_res.data:
+        logger.warning(f"İade: ürün bulunamadı: {product_id}")
+        return
+    product = prod_res.data[0]
+    new_stock = (product.get("stock_count") or 0) + quantity
+    client.table("products").update({"stock_count": new_stock}).eq("id", product_id).execute()
+
+    now = datetime.now(timezone.utc)
+    week_start = (now - timedelta(days=now.weekday())).date().isoformat()
+    try:
+        client.table("financials").insert({
+            "week_start": week_start,
+            "month": now.strftime("%Y-%m"),
+            "category": "iade",
+            "platform": "manual",
+            "amount_tl": -round(unit_price * quantity, 2),
+            "description": f"İade: {product.get('name', '')} (sipariş {order_id})",
+            "source": "return_manual",
+            "tax_category": "gider",
+        }).execute()
+    except Exception as e:
+        logger.warning(f"İade financials kaydı hatası: {e}")
+
+    logger.info(f"İade işlendi: sipariş {order_id}, ürün {product.get('name')}, +{quantity} stok")
 
 
 def _create_product_from_approval(approval_id: str, client):

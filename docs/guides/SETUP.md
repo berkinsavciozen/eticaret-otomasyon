@@ -165,3 +165,19 @@ GOOGLE_ADS_DEVELOPER_TOKEN=
 ### Hepsiburada / n11 (İsteğe Bağlı)
 - Aile üyesi kimliğiyle başvuru
 - n11: Chrome Connector kullanacak — API gerekmez
+
+## Manuel Operasyon Script'leri
+
+### İade Girişi (GAP-13)
+
+Gerçek webhook/API entegrasyonu gelene kadar (M6), bir iade fark edildiğinde
+manuel olarak `approval_queue`'ya düşürmek için:
+
+```bash
+python3 scripts/manual_return.py --order-id <uuid> --product-id <uuid> --quantity <int>
+```
+
+Sheet 1'e (Ürün Onay) düşer, skor kolonları boş kalır (restock_request
+pattern'iyle aynı, beklenen davranış). Berkin ONAY yazınca orkestrator
+siparişi `returned` yapar, stoğu geri artırır, `financials`'a negatif bir
+iade kaydı düşer.
