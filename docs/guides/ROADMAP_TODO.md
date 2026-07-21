@@ -201,20 +201,31 @@ Berkin'e sorulacak.
          artık onay/red notunu da Supabase'e yazıyor (yeni periyodik
          mirror'ın Berkin'in notunu üzerine yazmaması için).
 
-- [ ] **GAP-8 (KARAR VERİLDİ — geri alınabilir yapılacak):** Ürün onayı
-      artık tek yönlü değil. Berkin ONAY yazdıktan sonra fikrini değiştirip
-      RED yazarsa: oluşturulan `products` kaydı silinmez, durumu (GAP-7
-      sonrası) İPTAL'e çekilir (iz kalır). RED'den ONAY'a dönerse de aynı
-      şekilde tersine işlesin. `orkestrator._process_urun_approvals()`'ın
-      "sadece hâlâ pending olanı işle" mantığı kaldırılıp her yönde durum
-      senkronu yapacak şekilde güncellenecek.
+- [x] **GAP-8 — TAMAMLANDI (commit `876e1b0`):** Ürün onayı artık tek
+      yönlü değil. `orkestrator._process_urun_approvals()` Sheet 1'deki
+      aksiyonu her okuduğunda approval_queue'nun GÜNCEL durumuyla
+      karşılaştırıp gerekirse tersine çeviriyor: approved→rejected'ta
+      oluşturulan `products` kaydı silinmiyor, `delisted`'a çekiliyor (iz
+      kalıyor); rejected→approved'da aynı isimli `products` kaydı varsa
+      `approved`'e geri dönüyor, yoksa yeniden oluşturuluyor. Reversal'lar
+      log'da açıkça görünüyor ("Ürün onayı geri alındı: ... (approved→rejected)").
+      `docs/infrastructure/SUPABASE.md`'de `delisted`'ın artık "iptal edilen
+      onay" anlamında da kullanıldığı not edildi.
 
-- [ ] **GAP-9 (KARAR VERİLDİ — onaya tabi red maili):** Tedarikçi RED
-      yazıldığında, eğer kontak zaten ilerlemişse (test_sent veya sonrası),
-      Claude ile kibar bir red/vazgeçme maili taslağı üretilip Sheet3'e
-      yeni bir onay satırı (`mail_turu='red_bildirimi'`) olarak düşecek —
-      diğer tüm dışarı giden maillerle aynı prensip: Berkin onaylamadan
-      hiçbir mail gönderilmez.
+- [x] **GAP-9 — TAMAMLANDI (commit `01e4689` migration, `b188275` kod):**
+      Tedarikçi RED yazıldığında, kontak zaten ilerlemişse (test_sent veya
+      sonrası — `tm_id` atanmış), `tedarikci.py` Faz 6
+      (`_phase6_handle_rejection_notices`) Claude Haiku ile kibar bir
+      red/vazgeçme maili taslağı üretip Sheet3'e yeni bir onay satırı
+      (`mail_turu='red_bildirimi'`, mevcut tm_id yeniden kullanılıp Not
+      kolonuna "Orijinal TM-ID: ..." referansı yazılıyor — GAP-14'ü
+      büyütmemek için yeni TM-ID üretilmiyor) olarak düşüyor — diğer tüm
+      dışarı giden maillerle aynı prensip: Berkin onaylamadan hiçbir mail
+      gönderilmez. Onaylanınca gönderim mevcut Faz 3 akışı içinde otomatik
+      oluyor (subject/body `mail_turu`'ne göre seçiliyor, `supplier_contacts.status`
+      'rejected' olarak kalıyor). Migration: `rejection_notice_drafted`
+      kolonu (006_supplier_contacts_rejection_notice.sql, Berkin tarafından
+      Supabase'de manuel çalıştırılacak).
 
 - [ ] **GAP-10 (Test aşamasında kabul edilebilir, M5 ÖNCESİ ZORUNLU):**
       Mail onayında Gmail yanıtı içerik kontrolü yok (her yanıt otomatik
@@ -319,3 +330,4 @@ Faz 3 tamamlanmadan başlamaz. Hazır plan: docs/guides/LOVABLE_MIGRATION_PLAN.m
 | 21 Temmuz 2026 | GAP-6..13 eklendi (mimari analiz + forklar netleştirildi), GAP-1/2 migration'ları uygulandı olarak işaretlendi, şirket kurulmadan önce güvenlik notu eklendi |
 | 21 Temmuz 2026 | GAP-6 tamamlandı (commit `06ab94b`), GAP-7 kodu tamamlandı (commit `861e442`, migration script `483b677` — henüz çalıştırılmadı, Berkin onayı bekliyor) |
 | 21 Temmuz 2026 | GAP-7 tam tamamlandı olarak işaretlendi (migration script Berkin tarafından çalıştırıldı, Sheet3'te 5 satır güncellendi), GAP-14 eklendi (TM-ID race condition, düşük öncelik) |
+| 21 Temmuz 2026 | GAP-8 tamamlandı (commit `876e1b0`) — ürün onayı geri alınabilir. GAP-9 tamamlandı (migration `01e4689`, kod `b188275`) — tedarikçi RED'inde onaya tabi red bildirimi maili; `rejection_notice_drafted` migration'ı Berkin onayı bekliyor (Supabase'de manuel çalıştırılacak) |
