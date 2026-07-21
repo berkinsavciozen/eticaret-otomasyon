@@ -297,7 +297,8 @@ def _process_mail_approvals(sheet_id: str) -> int:
     if rejected_mails:
         logger.info(
             f"{len(rejected_mails)} mail reddi okundu "
-            f"(mail_approvals.onay_durumu='rejected' işaretlendi, işleme GAP-9'da eklenecek)"
+            f"(mail_approvals.onay_durumu='rejected' işaretlendi, ayrı işleme henüz eklenmedi — "
+            f"bu, mail taslağının kendisinin reddi; GAP-9 farklı bir akış, bkz. tedarikci.py Faz 6)"
         )
 
     return len(approved_mails)

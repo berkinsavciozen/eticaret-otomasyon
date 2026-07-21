@@ -91,8 +91,11 @@ Status akışı: `candidate → approved → sourcing → sourced → listed →
 ### `supplier_contacts` — Tedarikçi iletişim geçmişi
 
 Status akışı: `research_found → approved → test_sent → inquiry_sent → followup_sent`
+(RED yazılırsa herhangi bir aşamadan `rejected`'a geçebilir.)
 
-Önemli alanlar: `tm_id` (TM-001 formatı), `supplier_name`, `contact_email`, `email_body`, `contacted_at`
+Önemli alanlar: `tm_id` (TM-001 formatı), `supplier_name`, `contact_email`, `email_body`, `contacted_at`,
+`rejection_notice_drafted` (GAP-9 — RED sonrası onaya tabi red bildirimi maili taslağının
+tekrar üretilmesini önleyen flag, migration 006)
 
 > **M5+ TOKEN OPT-1:** `email_body` kolonu eklenecek — bir kez üretilen mail body cache'lenecek.
 

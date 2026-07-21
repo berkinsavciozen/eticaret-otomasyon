@@ -11,6 +11,8 @@
 #   Faz 4: 48s geçen inquiry_sent'lere takip maili
 #   Faz 5: inquiry_sent/followup_sent kontaklar için proforma teklifi işleme
 #          (proforma_offers Supabase tablosu + Sheet 4)
+#   Faz 6: RED yazılan (ve en az test_sent aşamasına ulaşmış) tedarikçi
+#          kontakları için onaya tabi red bildirimi maili taslağı (GAP-9)
 
 import os
 import re
@@ -89,6 +91,9 @@ def run():
         # Faz 5: Proforma teklifi işleme
         proforma_count = _phase5_handle_proforma(sheet_id)
 
+        # Faz 6: Tedarikçi RED bildirimi taslakları (GAP-9)
+        rejection_notices = _phase6_handle_rejection_notices(sheet_id)
+
         duration_ms = int((time.time() - start) * 1000)
         log_run(
             AGENT_NAME,
@@ -103,12 +108,14 @@ def run():
                 "real_sent": real_sent,
                 "followups": followup_count,
                 "proforma": proforma_count,
+                "rejection_notices": rejection_notices,
             },
         )
         logger.info(
             f"Tedarikçi tamamlandı ({duration_ms}ms) — "
             f"araştırıldı:{researched} test:{test_sent} gerçek:{real_sent} "
-            f"takip:{followup_count} proforma:{proforma_count}"
+            f"takip:{followup_count} proforma:{proforma_count} "
+            f"red_bildirimi:{rejection_notices}"
         )
 
     except Exception as e:
@@ -317,7 +324,9 @@ def _phase3_send_real_mails(sheet_id: Optional[str]) -> int:
     # Gmail inbox'ta [TM-XXX] reply var mı kontrol et → Sheet 3 güncelle
     _check_gmail_for_tm_replies(sheet_id, client)
 
-    # Sheet 3'te onaylı olanları al (rejected_mails burada işlenmiyor — GAP-9)
+    # Sheet 3'te onaylı olanları al (rejected_mails — mail taslağının kendi
+    # reddi — burada işlenmiyor, ayrı bir backlog maddesi; GAP-9 farklı bir
+    # akış, bkz. _phase6_handle_rejection_notices)
     try:
         approved_mails, _rejected_mails = check_mail_onay_approvals(sheet_id)
     except Exception as e:
@@ -328,6 +337,7 @@ def _phase3_send_real_mails(sheet_id: Optional[str]) -> int:
         tm_id = mail_item.get("tm_id", "")
         if not tm_id:
             continue
+        is_rejection_notice = mail_item.get("mail_turu") == "red_bildirimi"
 
         # TM-ID'den contact bul
         try:
@@ -335,7 +345,13 @@ def _phase3_send_real_mails(sheet_id: Optional[str]) -> int:
             if not res.data:
                 continue
             sc = res.data[0]
-            if sc.get("status") != "test_sent":
+            # Normal ilk_temas/takip akışı test_sent bekler; red bildirimi
+            # (GAP-9) ise kontak zaten 'rejected' durumundayken gönderilir —
+            # o durumu geri almaz, sadece bildirim mailini yollar.
+            if is_rejection_notice:
+                if sc.get("status") != "rejected":
+                    continue
+            elif sc.get("status") != "test_sent":
                 continue
 
             prod_res = client.table("products").select("*").eq("id", sc["product_id"]).execute()
@@ -347,20 +363,31 @@ def _phase3_send_real_mails(sheet_id: Optional[str]) -> int:
             continue
 
         # Gerçek mail gönder (MOCK → MOCK_SUPPLIER_EMAIL)
-        success = _send_real_inquiry_email(product, sc)
+        mail_turu = "red_bildirimi" if is_rejection_notice else "ilk_temas"
+        success = _send_real_inquiry_email(product, sc, mail_turu=mail_turu)
         if not success:
             continue
 
         # Supabase güncelle
-        now_str = datetime.now(timezone.utc).isoformat()
-        try:
-            client.table("supplier_contacts").update({
-                "status":       "inquiry_sent",
-                "contacted_at": now_str,
-                "notes":        build_durum_note("inquiry_sent", sc.get("notes", "")),
-            }).eq("id", sc["id"]).execute()
-        except Exception as e:
-            logger.warning(f"Faz 3: status güncelleme hatası: {e}")
+        if is_rejection_notice:
+            # Kontak zaten 'rejected' — bu terminal durumu geri almıyoruz,
+            # sadece bildirim mailinin gittiğini not düşüyoruz.
+            try:
+                client.table("supplier_contacts").update({
+                    "notes": build_durum_note("red_bildirimi_gonderildi", sc.get("notes", "")),
+                }).eq("id", sc["id"]).execute()
+            except Exception as e:
+                logger.warning(f"Faz 3: red bildirimi not güncelleme hatası: {e}")
+        else:
+            now_str = datetime.now(timezone.utc).isoformat()
+            try:
+                client.table("supplier_contacts").update({
+                    "status":       "inquiry_sent",
+                    "contacted_at": now_str,
+                    "notes":        build_durum_note("inquiry_sent", sc.get("notes", "")),
+                }).eq("id", sc["id"]).execute()
+            except Exception as e:
+                logger.warning(f"Faz 3: status güncelleme hatası: {e}")
 
         # Sheet 3 güncelle
         if sheet_id:
@@ -374,7 +401,10 @@ def _phase3_send_real_mails(sheet_id: Optional[str]) -> int:
             except Exception as e:
                 logger.warning(f"Faz 3: Sheet 3 güncelleme hatası: {e}")
 
-        logger.info(f"Gerçek mail gönderildi: {tm_id} → {sc.get('supplier_name')} ({MOCK_MAIL})")
+        if is_rejection_notice:
+            logger.info(f"Red bildirimi maili gönderildi: {tm_id} → {sc.get('supplier_name')} ({MOCK_MAIL})")
+        else:
+            logger.info(f"Gerçek mail gönderildi: {tm_id} → {sc.get('supplier_name')} ({MOCK_MAIL})")
         sent += 1
 
     return sent
@@ -517,6 +547,94 @@ def _phase5_handle_proforma(sheet_id: Optional[str]) -> int:
         processed += 1
 
     return processed
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FAZ 6: Tedarikçi RED bildirimi taslakları (GAP-9)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _phase6_handle_rejection_notices(sheet_id: Optional[str]) -> int:
+    """
+    Sheet 2'de RED yazılıp `supplier_contacts.status='rejected'` yapılmış,
+    ve daha önce en az test_sent aşamasına ulaşmış (tm_id atanmış) kontaklar
+    için Claude Haiku ile kibar bir red/vazgeçme maili taslağı üretir ve
+    Sheet 3'e YENİ bir satır (`mail_turu='red_bildirimi'`) olarak ekler.
+    research_found/approved aşamasında kalıp hiç mail gitmemiş kontaklar
+    atlanır — onlara zaten hiç temas kurulmadı.
+
+    GAP-14'teki TM-ID race condition'ı büyütmemek için burada yeni bir
+    TM-ID ÜRETİLMEZ — mevcut tm_id hem Sheet 3'ün TM-ID kolonuna (Faz 3'ün
+    aynı ID'den kontağı bulup gerçek gönderimi yapabilmesi için) hem de Not
+    kolonuna referans olarak taşınır. Gerçek gönderim, Berkin bu satırı
+    onayladığında mevcut _phase3_send_real_mails() akışının içinde otomatik
+    gerçekleşir (mail_turu ayrımı orada yapılır).
+    """
+    if not sheet_id:
+        return 0
+
+    client = get_client()
+    try:
+        contacts = (
+            client.table("supplier_contacts")
+            .select("*")
+            .eq("status", "rejected")
+            .eq("rejection_notice_drafted", False)
+            .not_.is_("tm_id", "null")
+            .execute()
+        )
+    except Exception as e:
+        logger.warning(f"Faz 6: supplier_contacts okunamadı: {e}")
+        return 0
+
+    drafted = 0
+    for sc in contacts.data:
+        contact_id = sc["id"]
+        tm_id = sc.get("tm_id")
+        if not tm_id:
+            continue
+
+        try:
+            prod_res = client.table("products").select("*").eq("id", sc["product_id"]).execute()
+            if not prod_res.data:
+                continue
+            product = prod_res.data[0]
+        except Exception as e:
+            logger.warning(f"Faz 6: ürün sorgu hatası: {e}")
+            continue
+
+        try:
+            email_body = _generate_rejection_email(product, sc)
+        except Exception as e:
+            logger.warning(f"Faz 6: red maili üretilemedi ({tm_id}): {e}")
+            continue
+
+        try:
+            append_mail_onay(sheet_id, {
+                "tm_id":               tm_id,
+                "product_id":          str(sc["product_id"]),
+                "product_title":       product.get("name", ""),
+                "supplier_name":       sc.get("supplier_name", ""),
+                "supplier_contact_id": contact_id,
+                "mail_turu":           "red_bildirimi",
+                "email_body":          email_body,
+                "test_gonderildi":     datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                "not":                 f"Orijinal TM-ID: {tm_id} | Red bildirimi",
+            })
+        except Exception as e:
+            logger.warning(f"Faz 6: Sheet 3 append hatası ({tm_id}): {e}")
+            continue
+
+        try:
+            client.table("supplier_contacts").update({
+                "rejection_notice_drafted": True,
+            }).eq("id", contact_id).execute()
+        except Exception as e:
+            logger.warning(f"Faz 6: rejection_notice_drafted güncelleme hatası: {e}")
+
+        logger.info(f"Red bildirimi taslağı oluşturuldu: {tm_id} → {sc.get('supplier_name')} (onay bekliyor)")
+        drafted += 1
+
+    return drafted
 
 
 def _get_estimated_price_tl(product: dict) -> float:
@@ -969,6 +1087,36 @@ Write only the email body. Keep under 200 words. Professional, friendly tone."""
     return resp.content[0].text.strip()
 
 
+def _generate_rejection_email(product: dict, supplier: dict) -> str:
+    """
+    GAP-9: Claude Haiku ile kibar, kısa bir "teşekkürler ama şu an
+    ilerlemiyoruz" tarzı red/vazgeçme maili üretir. Sadece Berkin RED sonrası
+    kontak en az test_sent aşamasına ulaşmışsa (yani tedarikçiyle gerçekten
+    temas kurulmuşsa) çağrılır.
+    """
+    ai = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    product_name = product.get("name", "")
+
+    prompt = f"""Write a short, polite email to a supplier we previously contacted, letting them know
+we will not be moving forward with this inquiry at this time.
+
+Product: {product_name}
+Supplier platform: {supplier.get("platform", "alibaba")}
+Sender name: {SENDER_NAME}
+
+Thank them for their time and the information they shared. Do not give a detailed reason.
+Leave the door open for future opportunities.
+End with: Best regards, {SENDER_NAME}
+Write only the email body. Keep under 120 words. Polite, professional, friendly tone."""
+
+    resp = ai.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=300,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return resp.content[0].text.strip()
+
+
 def _send_test_mail(product: dict, supplier_contact: dict, tm_id: str) -> Tuple[bool, str]:
     """
     Test mailini NOTIFICATION_EMAIL'e gönderir (Berkin'in Gmail'i).
@@ -1017,10 +1165,13 @@ ya da bu maili yanıtlayın.
         return False, ""
 
 
-def _send_real_inquiry_email(product: dict, supplier_contact: dict) -> bool:
+def _send_real_inquiry_email(product: dict, supplier_contact: dict, mail_turu: str = "ilk_temas") -> bool:
     """
-    Onaylanmış tedarikçiye gerçek teklif mailini gönderir.
-    Şu an MOCK_SUPPLIER_EMAIL'e gider. TM-ID konu satırında YOK.
+    Onaylanmış tedarikçiye gerçek maili gönderir. Şu an MOCK_SUPPLIER_EMAIL'e
+    gider. TM-ID konu satırında YOK.
+    `mail_turu='red_bildirimi'` (GAP-9) ise konu/gövde "Product Inquiry"
+    yerine kibar bir vazgeçme bildirimi olur — ONAY/gönderim akışı ortak
+    kalıyor, sadece içerik seçimi mail_turu'ne göre değişiyor.
     """
     supplier_email = MOCK_MAIL or supplier_contact.get("supplier_email", "")
     if not supplier_email:
@@ -1029,11 +1180,16 @@ def _send_real_inquiry_email(product: dict, supplier_contact: dict) -> bool:
     try:
         product_name = product.get("name", "Ürün")
         supplier_name = supplier_contact.get("supplier_name", "Supplier")
-        email_body = _generate_inquiry_email(product, supplier_contact)
+        if mail_turu == "red_bildirimi":
+            email_body = _generate_rejection_email(product, supplier_contact)
+            subject = f"Update on Inquiry: {product_name}"
+        else:
+            email_body = _generate_inquiry_email(product, supplier_contact)
+            subject = f"Product Inquiry: {product_name}"  # TM-ID YOK
 
         message = MIMEMultipart()
         message["to"]      = supplier_email
-        message["subject"] = f"Product Inquiry: {product_name}"  # TM-ID YOK
+        message["subject"] = subject
         if SENDER_EMAIL:
             message["from"] = f"{SENDER_NAME} <{SENDER_EMAIL}>"
         message.attach(MIMEText(email_body, "plain"))
@@ -1041,7 +1197,7 @@ def _send_real_inquiry_email(product: dict, supplier_contact: dict) -> bool:
         service = get_gmail_service()
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         service.users().messages().send(userId="me", body={"raw": raw}).execute()
-        logger.info(f"Gerçek teklif maili gönderildi: {supplier_name} → {supplier_email}")
+        logger.info(f"Gerçek mail gönderildi ({mail_turu}): {supplier_name} → {supplier_email}")
         return True
 
     except Exception as e:

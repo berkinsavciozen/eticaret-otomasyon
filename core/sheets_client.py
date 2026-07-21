@@ -758,8 +758,10 @@ def check_mail_onay_approvals(spreadsheet_id: str) -> tuple:
     Onay Durumu hâlâ açık (BEKLEMEDE/İŞLENİYOR) olan satırları 'approved'
     olarak, Excel Onay = RED yazılan satırları 'rejected' olarak döner.
     RED bu fonksiyonda sadece mail_approvals.onay_durumu='rejected' olarak
-    işaretlenip OKUNABİLİR hale getiriliyor — asıl işleme (red maili, GAP-9)
-    ayrı bir oturumda eklenecek.
+    işaretlenip OKUNABİLİR hale getiriliyor — bu, Excel Onay'a RED yazılan
+    (yani mail taslağının kendisi reddedilen) satırlar için; ayrı bir işleme
+    henüz eklenmedi (GAP-9 farklı bir akış — tedarikçi kontağının Sheet 2'de
+    RED'i sonrası red bildirimi maili taslağı, bkz. tedarikci.py Faz 6).
     """
     try:
         rows = read_sheet(spreadsheet_id, f"'{TAB_MAIL_ONAY}'!A1:K500")
@@ -777,6 +779,8 @@ def check_mail_onay_approvals(spreadsheet_id: str) -> tuple:
         if not _is_open_sistem_durum(mevcut):
             continue
 
+        mail_turu = row[M_MAIL_TURU] if len(row) > M_MAIL_TURU else ""
+
         aksiyon = parse_aksiyon(excel_raw)
         if aksiyon == AKSIYON_RED:
             rejected.append({
@@ -785,6 +789,7 @@ def check_mail_onay_approvals(spreadsheet_id: str) -> tuple:
                 "product_id": row[M_URUN_ID] if len(row) > M_URUN_ID else "",
                 "product_title": row[M_URUN_BASLIK] if len(row) > M_URUN_BASLIK else "",
                 "supplier_name": row[M_TEDARIKCI_ADI] if len(row) > M_TEDARIKCI_ADI else "",
+                "mail_turu": mail_turu,
             })
             _sync_mail_approval_status(tm_id, onay_durumu="rejected")
             continue
@@ -796,6 +801,7 @@ def check_mail_onay_approvals(spreadsheet_id: str) -> tuple:
                 "product_id": row[M_URUN_ID] if len(row) > M_URUN_ID else "",
                 "product_title": row[M_URUN_BASLIK] if len(row) > M_URUN_BASLIK else "",
                 "supplier_name": row[M_TEDARIKCI_ADI] if len(row) > M_TEDARIKCI_ADI else "",
+                "mail_turu": mail_turu,
             })
             _sync_mail_approval_status(tm_id, onay_durumu="approved",
                                         excel_onay=(excel_raw.strip() or None),
