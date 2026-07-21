@@ -16,6 +16,8 @@ from core.sheets_client import (
     check_mail_onay_approvals,
     update_mail_onay_status,
     process_proforma_approvals,
+    get_mail_onay_status_counts,
+    get_proforma_onay_status_counts,
     refresh_dashboard,
     get_gmail_service,
 )
@@ -331,16 +333,19 @@ def _refresh_dashboard_step(sheet_id: str, pending_counts: dict):
                 "score":    "",
             })
 
+        mail_pending, mail_approved_ct = get_mail_onay_status_counts(sheet_id)
+        proforma_pending, proforma_approved_ct = get_proforma_onay_status_counts(sheet_id)
+
         pipeline_data = {
             "urun_pending":       urun_pending,
             "urun_approved":      urun_approved,
             "urun_rejected":      urun_rejected,
             "tedarikci_pending":  tedarikci_pending,
             "tedarikci_approved": tedarikci_approved,
-            "mail_pending":       0,
-            "mail_approved":      0,
-            "proforma_pending":   0,
-            "proforma_approved":  0,
+            "mail_pending":       mail_pending,
+            "mail_approved":      mail_approved_ct,
+            "proforma_pending":   proforma_pending,
+            "proforma_approved":  proforma_approved_ct,
             "last_updated":       datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "product_supplier_matrix": matrix,
         }
