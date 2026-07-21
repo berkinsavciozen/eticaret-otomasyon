@@ -11,6 +11,7 @@ from core.sheets_client import (
     setup_all_sheets,
     mirror_urun_onay,
     mirror_tedarikci_onay,
+    mirror_proforma_onay,
     process_urun_onay_approvals,
     process_tedarikci_onay_approvals,
     check_mail_onay_approvals,
@@ -49,9 +50,10 @@ def run():
         # 2. Bekleyen onayları say
         pending_counts = _check_pending_approvals()
 
-        # 3. Sheet 1 ve Sheet 2'yi Supabase'den tazele
+        # 3. Sheet 1, 2 ve 4'ü Supabase'den tazele
         _mirror_urun_onay_to_sheets(sheet_id)
         _mirror_tedarikci_onay_to_sheets(sheet_id)
+        _mirror_proforma_onay_to_sheets(sheet_id)
 
         # 4. Dashboard güncelle
         _refresh_dashboard_step(sheet_id, pending_counts)
@@ -222,7 +224,7 @@ def _process_mail_approvals(sheet_id: str) -> int:
         return 0
 
     try:
-        approved_mails = check_mail_onay_approvals(sheet_id)
+        approved_mails, rejected_mails = check_mail_onay_approvals(sheet_id)
     except Exception as e:
         logger.warning(f"Sheet 3 okunamadı: {e}")
         return 0
@@ -231,6 +233,11 @@ def _process_mail_approvals(sheet_id: str) -> int:
         logger.info(
             f"{len(approved_mails)} mail onayı gönderim bekliyor "
             f"(gerçek gönderim tedarikci.py Faz 3'te yapılır)"
+        )
+    if rejected_mails:
+        logger.info(
+            f"{len(rejected_mails)} mail reddi okundu "
+            f"(mail_approvals.onay_durumu='rejected' işaretlendi, işleme GAP-9'da eklenecek)"
         )
 
     return len(approved_mails)
@@ -269,10 +276,10 @@ def _process_proforma_approvals_step(sheet_id: str) -> tuple:
             if offer.get("status") != "pending":
                 continue  # zaten işlendi
 
-            client.table("proforma_offers").update({
-                "status":      "approved",
-                "reviewed_at": now_iso,
-            }).eq("id", offer_id).execute()
+            update_fields = {"status": "approved", "reviewed_at": now_iso}
+            if item.get("note"):
+                update_fields["note"] = item["note"]
+            client.table("proforma_offers").update(update_fields).eq("id", offer_id).execute()
 
             client.table("products").update({"status": "sourced"}).eq(
                 "id", offer["product_id"]
@@ -291,10 +298,10 @@ def _process_proforma_approvals_step(sheet_id: str) -> tuple:
     for item in rejected_list:
         offer_id = item["id"]
         try:
-            client.table("proforma_offers").update({
-                "status":      "rejected",
-                "reviewed_at": now_iso,
-            }).eq("id", offer_id).execute()
+            update_fields = {"status": "rejected", "reviewed_at": now_iso}
+            if item.get("note"):
+                update_fields["note"] = item["note"]
+            client.table("proforma_offers").update(update_fields).eq("id", offer_id).execute()
         except Exception as e:
             logger.warning(f"Proforma red işleme hatası {offer_id}: {e}")
 
@@ -345,6 +352,31 @@ def _mirror_tedarikci_onay_to_sheets(sheet_id: str):
         logger.info(f"Sheet 2 mirror: {count} tedarikçi yazıldı")
     except Exception as e:
         logger.warning(f"Sheet 2 mirror hatası: {e}")
+
+
+# ── Sheet 4 mirror (GAP-7: K kolonu artık periyodik olarak sistem durumuna
+#    çevriliyor — Sheet1/2 ile aynı dual-purpose pattern) ─────────────────────
+
+def _mirror_proforma_onay_to_sheets(sheet_id: str):
+    """proforma_offers tablosunu Sheet 4'e yazar (products + supplier_contacts join ile)."""
+    if not sheet_id:
+        return
+    client = get_client()
+    try:
+        po_res = client.table("proforma_offers").select("*").order("created_at", desc=False).execute()
+        prod_res = client.table("products").select("id, name").execute()
+        prod_map = {p["id"]: p["name"] for p in prod_res.data}
+        sc_res = client.table("supplier_contacts").select("id, supplier_name").execute()
+        sc_map = {s["id"]: s["supplier_name"] for s in sc_res.data}
+        rows = []
+        for po in po_res.data:
+            po["product_title"] = prod_map.get(po.get("product_id"), "")
+            po["supplier_name"] = sc_map.get(po.get("supplier_contact_id"), "")
+            rows.append(po)
+        count = mirror_proforma_onay(sheet_id, rows)
+        logger.info(f"Sheet 4 mirror: {count} proforma yazıldı")
+    except Exception as e:
+        logger.warning(f"Sheet 4 mirror hatası: {e}")
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────

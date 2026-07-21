@@ -186,6 +186,115 @@ P_NOT             = 11
 P_TARIH           = 12
 
 
+# ── Standart durum sözlüğü (GAP-7) ─────────────────────────────────────────────
+# Supabase'deki iç status string'leri (products.status, supplier_contacts.status,
+# approval_queue.status, mail_approvals.onay_durumu, proforma_offers.status)
+# DEĞİŞMİYOR. Burada standardize edilen SADECE Sheets görünüm katmanı:
+#   1. Sistem Durumu — sistemin Supabase'den map'leyip yazdığı, TÜM sheet'lerde
+#      aynı 4 değer.
+#   2. Aksiyon — Berkin'in yazdığı, TÜM sheet'lerde aynı 3 değer, her zaman
+#      geri yazılabilir (ONAY↔RED↔BEKLEMEDE serbestçe).
+# Sheet1 (D), Sheet2 (P), Sheet4 (K) tek, dual-purpose bir kolon kullanır: aynı
+# hücre hem Berkin'in aksiyonunu hem (bir sonraki mirror'da) sistemin durumunu
+# taşır — mevcut Sheet1/2 pattern'i budur, Sheet4 de bu oturumda aynı pattern'e
+# taşındı (bkz. mirror_proforma_onay). Sheet3'te bu ikisi zaten ayrı kolon
+# (Excel Onay = aksiyon, Onay Durumu = sistem durumu).
+
+AKSIYON_BEKLEMEDE = "BEKLEMEDE"
+AKSIYON_ONAY      = "ONAY"
+AKSIYON_RED       = "RED"
+AKSIYON_DEGERLERI = [AKSIYON_BEKLEMEDE, AKSIYON_ONAY, AKSIYON_RED]
+
+SISTEM_BEKLEMEDE  = "BEKLEMEDE"
+SISTEM_ISLENIYOR  = "İŞLENİYOR"
+SISTEM_TAMAMLANDI = "TAMAMLANDI"
+SISTEM_IPTAL      = "İPTAL"
+SISTEM_DURUM_DEGERLERI = [SISTEM_BEKLEMEDE, SISTEM_ISLENIYOR, SISTEM_TAMAMLANDI, SISTEM_IPTAL]
+
+
+def _tr_upper(s: Optional[str]) -> str:
+    """
+    Türkçe İ/ı güvenli upper-case. Python'ın yerleşik .upper()/.lower() metodu
+    'İ' (U+0130) karakterini locale-bağımsız case-fold kurallarına göre iki
+    karaktere ('i' + combining dot) çeviriyor, bu da "İŞLENİYOR" gibi
+    değerlerle round-trip karşılaştırmayı bozuyor. Bu fonksiyon önce
+    i→İ / ı→I çevirip sonra upper() uygulayarak bunu güvenli hale getirir.
+    """
+    return (s or "").strip().replace("i", "İ").replace("ı", "I").upper()
+
+
+def _tr_upper_set(values) -> set:
+    return {_tr_upper(v) for v in values}
+
+
+_AKSIYON_ONAY_ALIASES = _tr_upper_set(["onay", "approved", "onaylandı"])
+_AKSIYON_RED_ALIASES  = _tr_upper_set(["red", "rejected", "reddedildi"])
+
+
+def parse_aksiyon(value: Optional[str]) -> str:
+    """
+    Aksiyon hücresini (Berkin'in yazdığı) standart üç değerden birine çevirir:
+    ONAY / RED / BEKLEMEDE. Case-insensitive, Türkçe İ/ı güvenli. Veri
+    migrasyonu (scripts/migrate_status_vocabulary.py) tamamlanana kadar eski
+    kelimeleri de (onaylandı/approved/reddedildi/rejected) kabul eder —
+    geriye dönük uyumluluk için.
+    Tüm 4 sheet'in approval-okuma fonksiyonu (process_urun_onay_approvals,
+    process_tedarikci_onay_approvals, check_mail_onay_approvals,
+    process_proforma_approvals) bunu kullanır.
+    """
+    v = _tr_upper(value)
+    if v in _AKSIYON_ONAY_ALIASES:
+        return AKSIYON_ONAY
+    if v in _AKSIYON_RED_ALIASES:
+        return AKSIYON_RED
+    return AKSIYON_BEKLEMEDE
+
+
+# Supabase/iç status değeri → Sheets'te gösterilen Türkçe sistem durumu.
+SYSTEM_DURUM_MAP = {
+    "pending":        SISTEM_BEKLEMEDE,
+    "research_found": SISTEM_BEKLEMEDE,
+    "approved":       SISTEM_ISLENIYOR,
+    "test_sent":      SISTEM_ISLENIYOR,
+    "inquiry_sent":   SISTEM_ISLENIYOR,
+    "followup_sent":  SISTEM_ISLENIYOR,
+    "sent":           SISTEM_TAMAMLANDI,
+    "completed":      SISTEM_TAMAMLANDI,
+    "rejected":       SISTEM_IPTAL,
+}
+
+
+def map_sistem_durum(raw_status: Optional[str]) -> str:
+    """Supabase'in iç status değerini Sheets'te gösterilecek Türkçe sistem durumuna çevirir."""
+    return SYSTEM_DURUM_MAP.get(raw_status or "", raw_status or "")
+
+
+_OPEN_SISTEM_DURUM_ALIASES = _tr_upper_set(["", "beklemede", "işleniyor", "pending", "approved"])
+
+
+def _is_open_sistem_durum(raw: Optional[str]) -> bool:
+    """Onay Durumu hâlâ 'açık' mı (BEKLEMEDE/İŞLENİYOR) — kapanmış (TAMAMLANDI/İPTAL) satırları tekrar işlememek için."""
+    return _tr_upper(raw) in _OPEN_SISTEM_DURUM_ALIASES
+
+
+_PENDING_BUCKET_ALIASES  = _tr_upper_set(["", "beklemede", "pending"])
+_APPROVED_BUCKET_ALIASES = _tr_upper_set(["işleniyor", "tamamlandı", "approved", "sent", "onaylandı"])
+
+
+def build_durum_note(raw_status: str, existing_note: str = "", when: Optional[str] = None) -> str:
+    """
+    Sistem Durumu artık sadece 4 üst-seviye değer gösteriyor (BEKLEMEDE/
+    İŞLENİYOR/TAMAMLANDI/İPTAL) — hangi alt-aşamada olunduğu bilgisi
+    (örn. 'test_sent', 'inquiry_sent') dropdown'dan kalktı. Bu fonksiyon o
+    bilgiyi Not kolonunun BAŞINA ekler, mevcut not içeriğinin üzerine yazmaz.
+    """
+    from datetime import datetime, timezone
+    ts = when or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    tag = f"Durum: {raw_status} ({ts})"
+    existing = (existing_note or "").strip()
+    return f"{tag} | {existing}" if existing else tag
+
+
 # ── Auth & service helpers ─────────────────────────────────────────────────────
 
 def _get_credentials() -> Credentials:
@@ -363,11 +472,13 @@ def _setup_validations(spreadsheet_id: str, service):
         for s in spreadsheet.get("sheets", [])
     }
 
-    # Durum değerleri — kullanıcı yazar
-    ONAY_DEGERLERI   = ["beklemede", "ONAY", "RED"]
-    # Durum değerleri — sistem yazar (mirror sonrası), kullanıcı salt okunur olarak görür
-    SISTEM_DEGERLERI = ["beklemede", "ONAY", "RED", "onaylandı", "reddedildi",
-                        "mail gönderildi", "takip gönderildi", "tamamlandı"]
+    # Dual-purpose kolonlar (Sheet1 D, Sheet2 P, Sheet4 K): aynı hücre hem
+    # Berkin'in aksiyonunu (BEKLEMEDE/ONAY/RED) hem bir sonraki mirror'da
+    # sistemin durumunu (BEKLEMEDE/İŞLENİYOR/TAMAMLANDI/İPTAL) taşıyabilir —
+    # dropdown her ikisini de kabul etmeli.
+    DUAL_PURPOSE_DEGERLERI = AKSIYON_DEGERLERI + [
+        v for v in SISTEM_DURUM_DEGERLERI if v not in AKSIYON_DEGERLERI
+    ]
 
     requests = []
 
@@ -375,33 +486,33 @@ def _setup_validations(spreadsheet_id: str, service):
     if TAB_URUN_ONAY in id_map:
         requests.append(_make_validation_request(
             id_map[TAB_URUN_ONAY], col=3,
-            values=SISTEM_DEGERLERI
+            values=DUAL_PURPOSE_DEGERLERI
         ))
 
     # Sheet 2: Durum (P = 15)
     if TAB_TEDARIKCI_ONAY in id_map:
         requests.append(_make_validation_request(
             id_map[TAB_TEDARIKCI_ONAY], col=15,
-            values=SISTEM_DEGERLERI
+            values=DUAL_PURPOSE_DEGERLERI
         ))
 
-    # Sheet 3: Excel Onay (G = 6) — kullanıcı ONAY yazar, blank da geçerli
+    # Sheet 3: Excel Onay (G = 6) — kullanıcı yazar, blank da geçerli
     if TAB_MAIL_ONAY in id_map:
         requests.append(_make_validation_request(
             id_map[TAB_MAIL_ONAY], col=6,
-            values=["ONAY"], strict=False
+            values=AKSIYON_DEGERLERI, strict=False
         ))
         # Onay Durumu (I = 8) — sistem yönetir
         requests.append(_make_validation_request(
             id_map[TAB_MAIL_ONAY], col=8,
-            values=["pending", "approved", "sent"], strict=False
+            values=SISTEM_DURUM_DEGERLERI, strict=False
         ))
 
-    # Sheet 4: Durum (K = 10)
+    # Sheet 4: Durum (K = 10) — Sheet1/2 ile aynı dual-purpose pattern
     if TAB_PROFORMA_ONAY in id_map:
         requests.append(_make_validation_request(
             id_map[TAB_PROFORMA_ONAY], col=10,
-            values=SISTEM_DEGERLERI
+            values=DUAL_PURPOSE_DEGERLERI
         ))
 
     if requests:
@@ -419,11 +530,6 @@ def mirror_urun_onay(spreadsheet_id: str, rows_data: List[Dict[str, Any]]):
     rows_data: Supabase approval_queue kayıtları listesi.
     Scoring sub-parametreler metadata JSONB alanından okunur.
     """
-    STATUS_MAP_URUN = {
-        "pending":  "beklemede",
-        "approved": "onaylandı",
-        "rejected": "reddedildi",
-    }
     values = [URUN_HEADER]
     for r in rows_data:
         meta = r.get("metadata") or {}
@@ -437,7 +543,7 @@ def mirror_urun_onay(spreadsheet_id: str, rows_data: List[Dict[str, Any]]):
             str(r.get("id", "")),
             r.get("title", ""),
             r.get("category", ""),
-            STATUS_MAP_URUN.get(r.get("status", ""), r.get("status", "")),
+            map_sistem_durum(r.get("status", "")),
             str(priority.get("rank", "")),
             priority.get("reason", ""),
             str(scoring.get("total", "")),
@@ -478,19 +584,16 @@ def process_urun_onay_approvals(spreadsheet_id: str) -> tuple:
     except Exception:
         return [], []
 
-    APPROVED_VALUES = {"approved", "onay", "onaylandı"}
-    REJECTED_VALUES = {"rejected", "red", "reddedildi"}
-
     approved, rejected = [], []
     for row in rows[1:]:
         if len(row) <= U_DURUM:
             continue
-        row_id = row[U_ID].strip() if len(row) > U_ID else ""
-        status  = row[U_DURUM].strip().lower() if len(row) > U_DURUM else ""
+        row_id  = row[U_ID].strip() if len(row) > U_ID else ""
+        aksiyon = parse_aksiyon(row[U_DURUM] if len(row) > U_DURUM else "")
         note    = row[U_REDDET_NOTU].strip() if len(row) > U_REDDET_NOTU else ""
-        if not row_id or status not in (APPROVED_VALUES | REJECTED_VALUES):
+        if not row_id or aksiyon == AKSIYON_BEKLEMEDE:
             continue
-        if status in APPROVED_VALUES:
+        if aksiyon == AKSIYON_ONAY:
             approved.append({"id": row_id, "note": note})
         else:
             rejected.append({"id": row_id, "note": note})
@@ -504,14 +607,6 @@ def mirror_tedarikci_onay(spreadsheet_id: str, rows_data: List[Dict[str, Any]]):
     supplier_contacts verilerini Sheet 2'ye yazar (clear + rewrite).
     Supabase status → Türkçe Durum eşlemesi yapar.
     """
-    STATUS_MAP = {
-        "research_found": "beklemede",
-        "approved":       "onaylandı",
-        "inquiry_sent":   "mail gönderildi",
-        "followup_sent":  "takip gönderildi",
-        "rejected":       "reddedildi",
-        "completed":      "tamamlandı",
-    }
     values = [TEDARIKCI_HEADER]
     for r in rows_data:
         scoring = r.get("supplier_scoring") or {}
@@ -522,7 +617,7 @@ def mirror_tedarikci_onay(spreadsheet_id: str, rows_data: List[Dict[str, Any]]):
             except Exception:
                 scoring = {}
         supabase_status = r.get("status", "")
-        display_status  = STATUS_MAP.get(supabase_status, supabase_status)
+        display_status  = map_sistem_durum(supabase_status)
         values.append([
             str(r.get("id", "")),
             str(r.get("product_id", "")),
@@ -594,19 +689,16 @@ def process_tedarikci_onay_approvals(spreadsheet_id: str) -> tuple:
     except Exception:
         return [], []
 
-    APPROVED_VALUES = {"approved", "onay"}
-    REJECTED_VALUES = {"rejected", "red", "reddedildi"}
-
     approved, rejected = [], []
     for row in rows[1:]:
         if len(row) <= T_DURUM:
             continue
-        row_id = row[T_ID].strip() if len(row) > T_ID else ""
-        status  = row[T_DURUM].strip().lower() if len(row) > T_DURUM else ""
+        row_id  = row[T_ID].strip() if len(row) > T_ID else ""
+        aksiyon = parse_aksiyon(row[T_DURUM] if len(row) > T_DURUM else "")
         note    = row[T_NOT].strip() if len(row) > T_NOT else ""
-        if not row_id or status not in (APPROVED_VALUES | REJECTED_VALUES):
+        if not row_id or aksiyon == AKSIYON_BEKLEMEDE:
             continue
-        if status in APPROVED_VALUES:
+        if aksiyon == AKSIYON_ONAY:
             approved.append({"id": row_id, "note": note,
                              "product_id": row[T_URUN_ID] if len(row) > T_URUN_ID else ""})
         else:
@@ -632,7 +724,7 @@ def append_mail_onay(spreadsheet_id: str, row_data: Dict[str, Any]):
         str(row_data.get("test_gonderildi", "")),
         "",                                   # Excel Onay — Berkin doldurur
         "",                                   # Gmail Onay — otomatik
-        "pending",                            # Onay Durumu
+        SISTEM_BEKLEMEDE,                     # Onay Durumu
         "",                                   # Gerçek Gönderim Tarihi
         row_data.get("not", ""),
     ]
@@ -660,27 +752,44 @@ def _upsert_mail_approval(row_data: Dict[str, Any]):
         pass  # Supabase yazımı ikincil — Sheets birincil arayüz olarak çalışmaya devam eder
 
 
-def check_mail_onay_approvals(spreadsheet_id: str) -> List[Dict[str, Any]]:
+def check_mail_onay_approvals(spreadsheet_id: str) -> tuple:
     """
-    Sheet 3'te Excel Onay = 'ONAY' veya Gmail Onay dolu olan
-    ve Onay Durumu = 'pending' olan satırları döner.
+    Sheet 3'te Excel Onay (aksiyon) = ONAY veya Gmail yanıtı gelmiş VE
+    Onay Durumu hâlâ açık (BEKLEMEDE/İŞLENİYOR) olan satırları 'approved'
+    olarak, Excel Onay = RED yazılan satırları 'rejected' olarak döner.
+    RED bu fonksiyonda sadece mail_approvals.onay_durumu='rejected' olarak
+    işaretlenip OKUNABİLİR hale getiriliyor — asıl işleme (red maili, GAP-9)
+    ayrı bir oturumda eklenecek.
     """
     try:
         rows = read_sheet(spreadsheet_id, f"'{TAB_MAIL_ONAY}'!A1:K500")
     except Exception:
-        return []
+        return [], []
 
-    approved = []
+    approved, rejected = [], []
     for i, row in enumerate(rows[1:], start=2):
         if len(row) <= M_ONAY_DURUMU:
             continue
         tm_id     = row[M_TM_ID].strip() if len(row) > M_TM_ID else ""
-        excel_ok  = row[M_EXCEL_ONAY].strip().upper() if len(row) > M_EXCEL_ONAY else ""
+        excel_raw = row[M_EXCEL_ONAY] if len(row) > M_EXCEL_ONAY else ""
         gmail_ok  = row[M_GMAIL_ONAY].strip() if len(row) > M_GMAIL_ONAY else ""
-        mevcut    = row[M_ONAY_DURUMU].strip().lower() if len(row) > M_ONAY_DURUMU else ""
-        if mevcut not in ("pending", "approved"):
+        mevcut    = row[M_ONAY_DURUMU] if len(row) > M_ONAY_DURUMU else ""
+        if not _is_open_sistem_durum(mevcut):
             continue
-        if excel_ok == "ONAY" or gmail_ok:
+
+        aksiyon = parse_aksiyon(excel_raw)
+        if aksiyon == AKSIYON_RED:
+            rejected.append({
+                "row_num": i,
+                "tm_id": tm_id,
+                "product_id": row[M_URUN_ID] if len(row) > M_URUN_ID else "",
+                "product_title": row[M_URUN_BASLIK] if len(row) > M_URUN_BASLIK else "",
+                "supplier_name": row[M_TEDARIKCI_ADI] if len(row) > M_TEDARIKCI_ADI else "",
+            })
+            _sync_mail_approval_status(tm_id, onay_durumu="rejected")
+            continue
+
+        if aksiyon == AKSIYON_ONAY or gmail_ok:
             approved.append({
                 "row_num": i,
                 "tm_id": tm_id,
@@ -689,9 +798,9 @@ def check_mail_onay_approvals(spreadsheet_id: str) -> List[Dict[str, Any]]:
                 "supplier_name": row[M_TEDARIKCI_ADI] if len(row) > M_TEDARIKCI_ADI else "",
             })
             _sync_mail_approval_status(tm_id, onay_durumu="approved",
-                                        excel_onay=excel_ok or None,
+                                        excel_onay=(excel_raw.strip() or None),
                                         gmail_yaniti_alindi=bool(gmail_ok))
-    return approved
+    return approved, rejected
 
 
 def _sync_mail_approval_status(tm_id: str, **fields):
@@ -714,12 +823,17 @@ def _sync_mail_approval_status(tm_id: str, **fields):
 def update_mail_onay_status(spreadsheet_id: str, row_num: int,
                              status: str, gercek_gonderim: Optional[str] = None,
                              note: Optional[str] = None):
-    """Mail Onay sheet'inde belirli satırın durumunu günceller."""
+    """
+    Mail Onay sheet'inde belirli satırın durumunu günceller.
+    `status`: mail_approvals.onay_durumu için kullanılan iç (İngilizce) değer
+    (ör. 'sent', 'approved', 'rejected') — Supabase'e olduğu gibi yazılır,
+    Sheets hücresine yazılırken Türkçe sistem durumu karşılığına çevrilir.
+    """
     rows = read_sheet(spreadsheet_id, f"'{TAB_MAIL_ONAY}'!A{row_num}:K{row_num}")
     if not rows:
         return
     row = rows[0] + [""] * (11 - len(rows[0]))  # padding
-    row[M_ONAY_DURUMU]     = status
+    row[M_ONAY_DURUMU]     = map_sistem_durum(status)
     row[M_GERCEK_GONDERIM] = gercek_gonderim or row[M_GERCEK_GONDERIM]
     row[M_NOT]             = note or row[M_NOT]
     update_row(spreadsheet_id, TAB_MAIL_ONAY, row_num, row)
@@ -750,11 +864,44 @@ def append_proforma_onay(spreadsheet_id: str, row_data: Dict[str, Any]):
         str(cogs or ""),
         str(row_data.get("tahmini_marj_pct", "")),
         str(fark),
-        row_data.get("durum", "beklemede"),
+        row_data.get("durum", SISTEM_BEKLEMEDE),
         row_data.get("not", ""),
         str(row_data.get("tarih", "")),
     ]
     append_to_sheet(spreadsheet_id, f"'{TAB_PROFORMA_ONAY}'!A1", [new_row])
+
+
+def mirror_proforma_onay(spreadsheet_id: str, rows_data: List[Dict[str, Any]]):
+    """
+    proforma_offers verilerini Sheet 4'e yazar (clear + rewrite) — Sheet1/2 ile
+    aynı pattern (GAP-7): K (Durum) kolonu dual-purpose — Berkin'in yazdığı
+    aksiyonu (ONAY/RED) orkestratör her cron'da önce okuyup Supabase'e işler,
+    bu fonksiyon SONRA çağrılıp K'yı güncel sistem durumuna (BEKLEMEDE/
+    İŞLENİYOR/TAMAMLANDI/İPTAL) çevirir. Önceden Sheet4'ün periyodik bir
+    mirror'ı yoktu — bu da Berkin'in yazdığı ONAY/RED'in işlendikten sonra
+    hiç sistem durumuna dönüşmeden K'da asılı kalmasına yol açıyordu.
+    rows_data: her satırda proforma_offers alanları + çağıranın eklediği
+    product_title / supplier_name.
+    """
+    values = [PROFORMA_HEADER]
+    for r in rows_data:
+        values.append([
+            str(r.get("id", "")),
+            str(r.get("product_id", "")),
+            r.get("product_title", ""),
+            r.get("supplier_name", ""),
+            str(r.get("teklif_fiyat_usd", "")),
+            str(r.get("moq", "")),
+            str(r.get("teslim_sure_gun", "")),
+            str(r.get("tahmini_cogs_tl", "")),
+            str(r.get("tahmini_marj_pct", "")),
+            str(r.get("firsatci_tahmini_fark_tl", "")),
+            map_sistem_durum(r.get("status", "")),
+            r.get("note", "") or "",
+            str(r.get("created_at", ""))[:16],
+        ])
+    clear_and_write_sheet(spreadsheet_id, f"'{TAB_PROFORMA_ONAY}'!A1", values)
+    return len(rows_data)
 
 
 def process_proforma_approvals(spreadsheet_id: str) -> tuple:
@@ -764,19 +911,16 @@ def process_proforma_approvals(spreadsheet_id: str) -> tuple:
     except Exception:
         return [], []
 
-    APPROVED_VALUES = {"approved", "onay", "onaylandı"}
-    REJECTED_VALUES = {"rejected", "red", "reddedildi"}
-
     approved, rejected = [], []
     for row in rows[1:]:
         if len(row) <= P_DURUM:
             continue
-        row_id = row[P_ID].strip() if len(row) > P_ID else ""
-        status  = row[P_DURUM].strip().lower() if len(row) > P_DURUM else ""
+        row_id  = row[P_ID].strip() if len(row) > P_ID else ""
+        aksiyon = parse_aksiyon(row[P_DURUM] if len(row) > P_DURUM else "")
         note    = row[P_NOT].strip() if len(row) > P_NOT else ""
-        if not row_id or status not in (APPROVED_VALUES | REJECTED_VALUES):
+        if not row_id or aksiyon == AKSIYON_BEKLEMEDE:
             continue
-        if status in APPROVED_VALUES:
+        if aksiyon == AKSIYON_ONAY:
             approved.append({"id": row_id, "note": note,
                              "product_id": row[P_URUN_ID] if len(row) > P_URUN_ID else ""})
         else:
@@ -785,21 +929,19 @@ def process_proforma_approvals(spreadsheet_id: str) -> tuple:
 
 
 def get_mail_onay_status_counts(spreadsheet_id: str) -> tuple:
-    """Sheet 3 Onay Durumu kolonundan (pending, approved) sayılarını döner."""
+    """Sheet 3 Onay Durumu kolonundan (bekleyen, işlemde/tamamlanan) sayılarını döner."""
     try:
         rows = read_sheet(spreadsheet_id, f"'{TAB_MAIL_ONAY}'!A1:K500")
     except Exception:
         return 0, 0
 
-    PENDING_VALUES  = {"pending", "beklemede"}
-    APPROVED_VALUES = {"approved", "sent", "onaylandı"}
-
     pending = approved = 0
     for row in rows[1:]:
-        status = row[M_ONAY_DURUMU].strip().lower() if len(row) > M_ONAY_DURUMU else ""
-        if status in PENDING_VALUES:
+        raw = row[M_ONAY_DURUMU] if len(row) > M_ONAY_DURUMU else ""
+        norm = _tr_upper(raw)
+        if norm in _PENDING_BUCKET_ALIASES:
             pending += 1
-        elif status in APPROVED_VALUES:
+        elif norm in _APPROVED_BUCKET_ALIASES:
             approved += 1
     return pending, approved
 
@@ -821,21 +963,19 @@ def get_mail_onay_status_counts_supabase() -> tuple:
 
 
 def get_proforma_onay_status_counts(spreadsheet_id: str) -> tuple:
-    """Sheet 4 Durum kolonundan (pending, approved) sayılarını döner."""
+    """Sheet 4 Durum kolonundan (bekleyen, işlemde/tamamlanan) sayılarını döner."""
     try:
         rows = read_sheet(spreadsheet_id, f"'{TAB_PROFORMA_ONAY}'!A1:M500")
     except Exception:
         return 0, 0
 
-    PENDING_VALUES  = {"pending", "beklemede"}
-    APPROVED_VALUES = {"approved", "onay", "onaylandı"}
-
     pending = approved = 0
     for row in rows[1:]:
-        status = row[P_DURUM].strip().lower() if len(row) > P_DURUM else ""
-        if status in PENDING_VALUES:
+        raw = row[P_DURUM] if len(row) > P_DURUM else ""
+        norm = _tr_upper(raw)
+        if norm in _PENDING_BUCKET_ALIASES:
             pending += 1
-        elif status in APPROVED_VALUES:
+        elif norm in _APPROVED_BUCKET_ALIASES:
             approved += 1
     return pending, approved
 
@@ -877,15 +1017,13 @@ def refresh_dashboard(spreadsheet_id: str, pipeline_data: Dict[str, Any]):
         ["4 - Proforma Onay",   "Durum (K)",       "RED",   "Proformayı reddeder"],
         [],
         ["── DURUM ANLAMI ──"],
-        ["Durum",            "Açıklama"],
-        ["beklemede",        "Sistem yazdı, senin kararını bekliyor"],
-        ["ONAY",             "Sen yazdın → orkestratör işleyecek"],
-        ["RED",              "Sen yazdın → orkestratör işleyecek"],
-        ["onaylandı",        "Orkestratör işledi, Supabase güncellendi"],
-        ["reddedildi",       "Orkestratör işledi, Supabase güncellendi"],
-        ["mail gönderildi",  "Test maili gönderildi, Gmail yanıtı bekleniyor"],
-        ["takip gönderildi", "48 saat geçti, takip maili gönderildi"],
-        ["tamamlandı",       "Süreç bu tedarikçi için bitti"],
+        ["Durum",      "Açıklama"],
+        ["BEKLEMEDE",  "Sistem yazdı (senin kararını bekliyor) veya sen henüz aksiyon yazmadın"],
+        ["ONAY",       "Sen yazdın → orkestratör bir sonraki cron'da işleyecek (RED'e veya tekrar BEKLEMEDE'ye geri dönebilirsin)"],
+        ["RED",        "Sen yazdın → orkestratör bir sonraki cron'da işleyecek (ONAY'a veya tekrar BEKLEMEDE'ye geri dönebilirsin)"],
+        ["İŞLENİYOR",  "Orkestratör işledi, süreç devam ediyor (Supabase güncellendi)"],
+        ["TAMAMLANDI", "Süreç bu kayıt için bitti"],
+        ["İPTAL",      "Reddedildi / iptal edildi (Supabase güncellendi)"],
         [],
         ["── PIPELINE ÖZETİ ──"],
         ["Aşama",             "Bekleyen", "Onaylanan", "Reddedilen"],

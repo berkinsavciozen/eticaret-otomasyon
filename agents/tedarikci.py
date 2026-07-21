@@ -39,8 +39,10 @@ from core.sheets_client import (
     append_proforma_onay,
     update_row,
     read_sheet,
+    build_durum_note,
     TAB_MAIL_ONAY,
     M_TM_ID, M_GMAIL_ONAY, M_ONAY_DURUMU,
+    SISTEM_BEKLEMEDE, SISTEM_ISLENIYOR,
 )
 
 logger = get_logger("tedarikci")
@@ -193,7 +195,7 @@ def _phase1_supplier_research(sheet_id: Optional[str]) -> int:
                         "birim_usd":     supplier.get("birim_usd", ""),
                         "moq":           supplier.get("moq", ""),
                         "scoring":       scoring,
-                        "durum":         "beklemede",
+                        "durum":         SISTEM_BEKLEMEDE,
                         "not":           supplier.get("not", ""),
                         "tarih":         datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
                     })
@@ -265,10 +267,13 @@ def _phase2_send_test_mails(sheet_id: Optional[str]) -> int:
             continue
 
         # Supabase güncelle
+        # Not: Sistem Durumu artık sadece 4 üst-seviye değer gösteriyor (GAP-7),
+        # bu yüzden 'test_sent' alt-aşama detayı notes'un başına tag olarak eklenir.
         try:
             client.table("supplier_contacts").update({
                 "tm_id":  tm_id,
                 "status": "test_sent",
+                "notes":  build_durum_note("test_sent", sc.get("notes", "")),
             }).eq("id", contact_id).execute()
         except Exception as e:
             logger.warning(f"Faz 2: status güncelleme hatası: {e}")
@@ -312,9 +317,9 @@ def _phase3_send_real_mails(sheet_id: Optional[str]) -> int:
     # Gmail inbox'ta [TM-XXX] reply var mı kontrol et → Sheet 3 güncelle
     _check_gmail_for_tm_replies(sheet_id, client)
 
-    # Sheet 3'te onaylı olanları al
+    # Sheet 3'te onaylı olanları al (rejected_mails burada işlenmiyor — GAP-9)
     try:
-        approved_mails = check_mail_onay_approvals(sheet_id)
+        approved_mails, _rejected_mails = check_mail_onay_approvals(sheet_id)
     except Exception as e:
         logger.warning(f"Faz 3: Sheet 3 okunamadı: {e}")
         return 0
@@ -352,6 +357,7 @@ def _phase3_send_real_mails(sheet_id: Optional[str]) -> int:
             client.table("supplier_contacts").update({
                 "status":       "inquiry_sent",
                 "contacted_at": now_str,
+                "notes":        build_durum_note("inquiry_sent", sc.get("notes", "")),
             }).eq("id", sc["id"]).execute()
         except Exception as e:
             logger.warning(f"Faz 3: status güncelleme hatası: {e}")
@@ -396,9 +402,10 @@ def _phase4_send_followups() -> int:
                 continue  # Mock kontaklar için takip gönderme
             try:
                 _send_followup_email(contact)
-                client.table("supplier_contacts").update(
-                    {"status": "followup_sent"}
-                ).eq("id", contact["id"]).execute()
+                client.table("supplier_contacts").update({
+                    "status": "followup_sent",
+                    "notes":  build_durum_note("followup_sent", contact.get("notes", "")),
+                }).eq("id", contact["id"]).execute()
                 sent += 1
             except Exception as e:
                 logger.warning(f"Takip maili gönderilemedi: {e}")
@@ -499,7 +506,7 @@ def _phase5_handle_proforma(sheet_id: Optional[str]) -> int:
                     "tahmini_cogs_tl":  offer.get("tahmini_cogs_tl", ""),
                     "tahmini_marj_pct": offer.get("tahmini_marj_pct", ""),
                     "firsatci_tahmini_tl": _get_estimated_price_tl(product),
-                    "durum":            "beklemede",
+                    "durum":            SISTEM_BEKLEMEDE,
                     "not":              offer.get("note", ""),
                     "tarih":            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
                 })
@@ -1114,8 +1121,10 @@ def _check_gmail_for_tm_replies(sheet_id: str, client):
                     if row and len(row) > M_TM_ID and row[M_TM_ID] == found_tm:
                         row_padded = row + [""] * (11 - len(row))
                         row_padded[M_GMAIL_ONAY] = "Gmail Yanıtı Alındı"
-                        if row_padded[M_ONAY_DURUMU] == "pending":
-                            row_padded[M_ONAY_DURUMU] = "approved"
+                        # Eski sheet verisinde "pending"/"beklemede" de olabilir
+                        # (migrasyon öncesi) — GAP-7: yeni yazımlarda SISTEM_BEKLEMEDE.
+                        if row_padded[M_ONAY_DURUMU] in (SISTEM_BEKLEMEDE, "pending", "beklemede"):
+                            row_padded[M_ONAY_DURUMU] = SISTEM_ISLENIYOR
                         update_row(sheet_id, "Mail Onay", i, row_padded)
                         logger.info(f"Sheet 3 Gmail Onay güncellendi: {found_tm}")
                         break
