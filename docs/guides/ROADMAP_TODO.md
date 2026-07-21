@@ -138,15 +138,15 @@ Berkin'e sorulacak.
          artık gerçekten besleneceğini doğrula — bu Faz 3'te E2E test
          edilecek.
 
-- [ ] **GAP-6 (Küçük):** `orkestrator._check_pending_approvals()` (Gmail
-      hatırlatma mailinin kullandığı sayaç — BUG-3'ün düzelttiği dashboard
-      sayacından FARKLI bir fonksiyon) hâlâ tedarikçi/mail/proforma için
-      hardcoded 0 döndürüyor (`# M4'te dolar` yorumu). Gmail hatırlatma
-      maili bu yüzden gerçek bekleyen sayısını göstermiyor.
-      `get_mail_onay_status_counts()` / `get_proforma_onay_status_counts()`
-      buraya da uygulanmalı.
+- [x] **GAP-6 (Küçük) — TAMAMLANDI (21 Temmuz 2026, commit `06ab94b`):**
+      `orkestrator._check_pending_approvals()` artık tedarikçi (research_found
+      sayısı, Supabase), mail ve proforma (get_mail_onay_status_counts() /
+      get_proforma_onay_status_counts(), Sheets) için gerçek sayıları
+      döndürüyor. Gmail hatırlatma maili artık doğru bekleyen sayısını
+      gösteriyor.
 
-- [ ] **GAP-7 (TEMEL — diğer her şeyden ÖNCE yapılmalı, KARAR VERİLDİ):**
+- [x] **GAP-7 (TEMEL, KARAR VERİLDİ) — KOD TAMAMLANDI, MİGRASYON BEKLİYOR
+      (21 Temmuz 2026, commit `861e442` + script `483b677`):**
       Durum sözlüğü standardizasyonu. Şu an her sheet'te farklı durum
       kelimeleri var (beklemede/onaylandı/reddedildi, pending/sent/approved,
       research_found/inquiry_sent/completed vb.) — bunlar TEK bir standart
@@ -161,26 +161,48 @@ Berkin'e sorulacak.
         serbest metin olarak taşınacak.
 
       Kapsam:
-      1. `core/sheets_client.py`'deki TÜM `STATUS_MAP` sözlüklerini bu tek
-         standarda göre yeniden yaz (Sheet1/2/3/4 hepsi).
-      2. `_setup_validations()`'daki dropdown value listelerini güncelle.
-      3. **VERİ MİGRASYONU GEREKİYOR** — spreadsheet'te (ID:
-         1HfRKYMah7HcawCjmSYjE7OXMtOuvHQVJ25GH5zcTmvw) şu an canlı veride
-         eski kelimeler var (örn. Sheet1'de "onaylandı"/"reddedildi",
-         Sheet2'de "tamamlandı", Sheet3'te "sent"/"pending", Sheet4'te
-         "ONAY"). Tek seferlik bir migration script'i (`scripts/` klasörü
-         altında, `migrate_status_vocabulary.py` gibi) yaz — her 4 sheet'i
-         okuyup eski değerleri yeni standarda çevirip geri yazsın. SQL
-         migration değil, Sheets API üzerinden bir Python script olacak
-         (mevcut `core/sheets_client.py` fonksiyonlarını kullanabilir).
-         ÇALIŞTIRMADAN ÖNCE script'i göster, onay iste.
-      4. Supabase tablolarındaki (`products.status`, `supplier_contacts.status`,
+      1. [x] `core/sheets_client.py`'ye merkezi `SYSTEM_DURUM_MAP` +
+         `map_sistem_durum()` eklendi, Sheet1/2/4 mirror fonksiyonları artık
+         bunu kullanıyor (eskiden birbiriyle tutarsız ayrı `STATUS_MAP`'ler
+         vardı). Ortak `parse_aksiyon()` (case-insensitive, Türkçe İ/ı güvenli)
+         tüm 4 sheet'in approval-okuma fonksiyonunda kullanılıyor.
+      2. [x] `_setup_validations()`'daki dropdown value listeleri yeni
+         standarda göre güncellendi.
+      3. [x] **Migration script'i YAZILDI, `--dry-run` ile mock veriyle test
+         edildi, ama gerçek spreadsheet'e (ID:
+         1HfRKYMah7HcawCjmSYjE7OXMtOuvHQVJ25GH5zcTmvw) KARŞI HENÜZ
+         ÇALIŞTIRILMADI** — `scripts/migrate_status_vocabulary.py`
+         (commit `483b677`). Bu oturumda Railway/Sheets credential'ları
+         mevcut değildi, o yüzden gerçek çalıştırma Berkin'in onayı +
+         kendi ortamında (veya credential'ları olan bir sonraki oturumda)
+         yapılması gerekiyor. Çalıştırılana kadar canlı sheet'te eski
+         kelimeler (Sheet1 "onaylandı"/"reddedildi", Sheet2 "tamamlandı",
+         Sheet3 "sent"/"pending", Sheet4 "ONAY") durmaya devam eder — kod
+         hem yeni hem eski kelimeleri okuyabildiği için (geriye dönük
+         uyumluluk) bu functional bir sorun yaratmaz, sadece görünüm
+         migrasyon çalışana kadar karışık kalır.
+      4. [x] **TASARIM KARARI:** Supabase tablolarındaki iç status
+         değerleri (`products.status`, `supplier_contacts.status`,
          `approval_queue.status`, `mail_approvals.onay_durumu`,
-         `proforma_offers.status`) durum değerlerinin de bu yeni standarda
-         göre güncellenip güncellenmeyeceğine dair NOT ekle (büyük ihtimalle
-         Supabase içi teknik status'lar aynı kalabilir — sadece Sheets
-         görünümü standardize ediliyor olabilir; bu netleşmesi gereken bir
-         tasarım kararı, GAP-7'nin kod oturumunda kararlaştırılacak).
+         `proforma_offers.status`) DEĞİŞMEDİ — bu string'ler kodun her
+         yerinde `.eq("status", ...)` sorgularında kullanıldığı için
+         değiştirmenin blast radius'u bu oturumun kapsamı dışındaydı.
+         SADECE Sheets görünüm katmanı (kullanıcıya gösterilen metin +
+         aksiyon dropdown parse mantığı) standardize edildi.
+      5. [x] **Sheet4 (Proforma) K kolonu ayrımı çözüldü:** K kolonunun
+         periyodik bir mirror'ı yoktu (Sheet1/2'nin aksine), bu yüzden
+         Berkin'in yazdığı ONAY/RED işlendikten sonra hiçbir zaman sistem
+         durumuna dönüşmeden K'da asılı kalıyordu — canlı veride bir
+         satırda "ONAY" görülmesinin sebebi buydu. Yeni bir kolon EKLEMEK
+         yerine (Sheet1/2'de zaten böyle ikinci bir kolon yok), Sheet4'e
+         Sheet1/2 ile birebir aynı pattern uygulandı: `mirror_proforma_onay()`
+         eklendi ve orkestratörün her cron cycle'ında Sheet1/2 gibi Sheet4'ü
+         de proforma_offers'tan tazelemesi sağlandı. K kolonu Sheet1 D /
+         Sheet2 P ile aynı şekilde dual-purpose kalmaya devam ediyor
+         (Berkin'in aksiyonu → orkestratör okur/işler → bir sonraki mirror
+         sistem durumuna çevirir). `_process_proforma_approvals_step()`
+         artık onay/red notunu da Supabase'e yazıyor (yeni periyodik
+         mirror'ın Berkin'in notunu üzerine yazmaması için).
 
 - [ ] **GAP-8 (KARAR VERİLDİ — geri alınabilir yapılacak):** Ürün onayı
       artık tek yönlü değil. Berkin ONAY yazdıktan sonra fikrini değiştirip
@@ -280,3 +302,4 @@ Faz 3 tamamlanmadan başlamaz. Hazır plan: docs/guides/LOVABLE_MIGRATION_PLAN.m
 |---|---|
 | 21 Temmuz 2026 | Konsolidasyon: ONBOARDING.md silindi, PENDING_FIXES.md → ROADMAP_TODO.md, GAP-1..5 eklendi, BUG-3/4/5 tamamlandı, GAP-2 kararı verildi (şimdi implemente edilecek), eticaret-operations kararı verildi (mock modda devam) |
 | 21 Temmuz 2026 | GAP-6..13 eklendi (mimari analiz + forklar netleştirildi), GAP-1/2 migration'ları uygulandı olarak işaretlendi, şirket kurulmadan önce güvenlik notu eklendi |
+| 21 Temmuz 2026 | GAP-6 tamamlandı (commit `06ab94b`), GAP-7 kodu tamamlandı (commit `861e442`, migration script `483b677` — henüz çalıştırılmadı, Berkin onayı bekliyor) |
