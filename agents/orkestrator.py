@@ -381,6 +381,11 @@ def _process_proforma_approvals_step(sheet_id: str) -> tuple:
     - İlgili products kaydının status'u 'sourcing' → 'sourced' yapılır
       (listeleme.py'nin _get_sourced_products() bu geçişi bekliyor)
     - İlgili supplier_contacts kaydının status'u 'completed' yapılır
+    - GAP-11: aynı ürüne ait, hâlâ pending olan DİĞER proformalar otomatik
+      İPTAL edilir (çoklu-onay engeli).
+    Red olduğunda (GAP-11): aynı ürün için başka pending proforma veya aktif
+    (rejected olmayan) tedarikçi kontağı kalmadıysa, ürün otomatik olarak
+    yeniden tedarikçi araştırmasına düşer.
     """
     if not sheet_id:
         return 0, 0
@@ -418,6 +423,9 @@ def _process_proforma_approvals_step(sheet_id: str) -> tuple:
                     "id", offer["supplier_contact_id"]
                 ).execute()
 
+            _cancel_sibling_pending_proformas(offer["product_id"], offer_id, client)
+            _check_and_requeue_if_exhausted(offer["product_id"], client)
+
             approved_count += 1
             logger.info(f"Proforma onaylandı: {offer_id} → ürün sourced, tedarikçi completed")
         except Exception as e:
@@ -426,16 +434,100 @@ def _process_proforma_approvals_step(sheet_id: str) -> tuple:
     for item in rejected_list:
         offer_id = item["id"]
         try:
+            res = client.table("proforma_offers").select("product_id").eq("id", offer_id).execute()
+            product_id = res.data[0].get("product_id") if res.data else None
+
             update_fields = {"status": "rejected", "reviewed_at": now_iso}
             if item.get("note"):
                 update_fields["note"] = item["note"]
             client.table("proforma_offers").update(update_fields).eq("id", offer_id).execute()
+
+            _check_and_requeue_if_exhausted(product_id, client)
         except Exception as e:
             logger.warning(f"Proforma red işleme hatası {offer_id}: {e}")
 
     if approved_count:
         logger.info(f"{approved_count} proforma onaylandı (sourced geçişi tetiklendi)")
     return approved_count, len(rejected_list)
+
+
+def _cancel_sibling_pending_proformas(product_id, approved_offer_id: str, client):
+    """
+    GAP-11: bir proforma onaylandığında, aynı ürüne ait hâlâ pending olan
+    diğer proformaları otomatik 'rejected' yapar. Sheet4 mirror'ı bir sonraki
+    run'da bunları İPTAL gösterir (map_sistem_durum zaten 'rejected'→İPTAL
+    çeviriyor, GAP-7 sözlüğü).
+    """
+    if not product_id:
+        return
+    try:
+        siblings = (
+            client.table("proforma_offers")
+            .select("id")
+            .eq("product_id", product_id)
+            .eq("status", "pending")
+            .neq("id", approved_offer_id)
+            .execute()
+        )
+        for sibling in siblings.data:
+            client.table("proforma_offers").update({
+                "status": "rejected",
+                "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                "note": "Otomatik iptal: aynı ürün için başka bir proforma onaylandı",
+            }).eq("id", sibling["id"]).execute()
+        if siblings.data:
+            logger.info(f"{len(siblings.data)} proforma otomatik iptal edildi (ürün {product_id})")
+    except Exception as e:
+        logger.warning(f"Proforma cascade iptal hatası (ürün {product_id}): {e}")
+
+
+def _check_and_requeue_if_exhausted(product_id, client):
+    """
+    GAP-11: bir ürün için tüm yollar tükendiyse (hiç pending proforma yok VE
+    'rejected' olmayan aktif bir supplier_contacts kaydı da yok) ürünü
+    _requeue_product_for_sourcing ile yeniden tedarikçi araştırmasına sokar.
+    Hem onay hem red döngüsünden çağrılır — onay durumunda tükenme oluşması
+    ihtimal dışı (az önce completed edilen kontak aktif sayılır) ama
+    fonksiyon her iki akışta da tutarlı davransın diye buradan da çağrılıyor.
+    """
+    if not product_id:
+        return
+    try:
+        pending = (
+            client.table("proforma_offers")
+            .select("id")
+            .eq("product_id", product_id)
+            .eq("status", "pending")
+            .execute()
+        )
+        if pending.data:
+            return
+
+        active_contacts = (
+            client.table("supplier_contacts")
+            .select("id")
+            .eq("product_id", product_id)
+            .neq("status", "rejected")
+            .execute()
+        )
+        if active_contacts.data:
+            return
+
+        _requeue_product_for_sourcing(product_id, client, "tüm proformalar reddedildi")
+    except Exception as e:
+        logger.warning(f"Tükenme kontrolü hatası (ürün {product_id}): {e}")
+
+
+def _requeue_product_for_sourcing(product_id, client, reason: str):
+    """
+    products.status'u 'approved'e geri çeker — tedarikci.py'nin
+    _phase1_supplier_research() bir sonraki run'da bunu tekrar işleyip yeni
+    tedarikçi adayları bulur (GAP-11/GAP-12 paylaşılan helper; bunun
+    çalışması için _phase1_supplier_research()'teki "zaten araştırıldı mı"
+    kontrolünün sadece aktif/rejected-olmayan kontakları sayması gerekir).
+    """
+    client.table("products").update({"status": "approved"}).eq("id", product_id).execute()
+    logger.info(f"Ürün yeniden tedarikçi araştırmasına alındı ({reason}): {product_id}")
 
 
 # ── Sheet 1 mirror ────────────────────────────────────────────────────────────

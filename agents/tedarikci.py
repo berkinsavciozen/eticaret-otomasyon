@@ -146,11 +146,15 @@ def _phase1_supplier_research(sheet_id: Optional[str]) -> int:
     for product in products.data:
         pid = product["id"]
 
-        # Bu ürün için zaten araştırma yapıldı mı?
+        # Bu ürün için zaten aktif bir araştırma var mı? (GAP-11/GAP-12:
+        # 'rejected' kontaklar sayılmaz — ürün _requeue_product_for_sourcing
+        # ile 'approved'e geri çekildiğinde, eski kontakların hepsi
+        # 'rejected'sa Faz 1 ürünü tekrar görüp yeni adaylar arasın.)
         existing = (
             client.table("supplier_contacts")
             .select("id")
             .eq("product_id", pid)
+            .neq("status", "rejected")
             .execute()
         )
         if existing.data:
