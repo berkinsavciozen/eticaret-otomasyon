@@ -122,11 +122,23 @@ Status: `new → shipped → delivered` / `return_requested → returned`
 
 ### `financials` — Gelir/gider kayıtları
 
-`amount_tl`: gelir pozitif, gider negatif. `category` alanı için değerler: `gelir_shopify`, `gelir_trendyol`, `cogs`, `komisyon_trendyol`, `kargo`, `reklam`, `sabit_gider`, `banka_hareketi`, `kdv_yukumlulugu`
+Önemli alanlar (`agents/finans.py._write_financials` ile birebir, GAP-3
+kapatıldı — bkz. ROADMAP_TODO.md): `week_start`, `month`, `category`,
+`platform`, `amount_tl` (gelir pozitif, gider negatif), `description`,
+`source`, `tax_category` (`gelir`/`maliyet`/`gider`/`kdv`/`diger`).
 
-> **GAP-3 (açık):** Bu bölümdeki şema ile `agents/finans.py` kodunun kullandığı
-> alanlar arasında tutarsızlık var. Supabase'den `information_schema.columns`
-> ile gerçek şema teyit edilip bu bölüm düzeltilecek — bkz. ROADMAP_TODO.md.
+`category` alanı serbest metin — kodun ürettiği değerler: platform geliri
+için `rev.get("category", "platform_revenue")`, banka girişleri için Banka
+sheet'indeki `Kategori` kolonu (`Gelir`/`COGS`/`Kargo`/`Reklam`/`Sabit
+Gider`/`Komisyon`/`KDV`/`Diğer`), GAP-13 iade kaydı için `iade`.
+
+> **GAP-3 — KAPATILDI:** Bu bölümdeki eski şema (sadece `amount_tl` +
+> `category`, değer listesi `gelir_shopify` vb.) `agents/finans.py` koduyla
+> uyuşmuyordu. Bu oturumda Supabase'in gerçek şemasına (canlı proje
+> `ypusjrrklxssjvefkypd`) bu Claude Code oturumundan erişilemedi (bağlı
+> Supabase MCP bağlantısı farklı, ilgisiz projelere işaret ediyordu); Berkin
+> onayıyla `finans.py`'nin zaten kullandığı ve prodüksiyonda hatasız
+> çalışan alanlar ground truth kabul edildi.
 
 ### `preferred_suppliers` — Başarılı tedarikçi hafızası (M5+)
 

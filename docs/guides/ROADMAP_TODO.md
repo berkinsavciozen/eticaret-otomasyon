@@ -233,28 +233,41 @@ Berkin'e sorulacak.
       eklenmesi ZORUNLU — Claude ile yanıtın onay/red niyetini sınıflandır,
       Sheet3 Excel Onay'a RED de yazılabilsin.
 
-- [ ] **GAP-11 (KARAR VERİLDİ — eklenecek):** Proforma çoklu-onay engeli +
-      red sonrası otomatik fallback. Bir tedarikçinin proformasını
-      onaylamak, aynı ürünün diğer bekleyen proformalarını otomatik İPTAL
-      yapacak. TÜM proformalar red olursa (başka bekleyen yoksa), ürün
-      otomatik olarak yeniden tedarikçi araştırmasına düşecek
-      (`iliski_tipi='reorder'`, mevcut alan zaten destekliyor).
+- [x] **GAP-11 — TAMAMLANDI (commit `4b32cdc`):** Proforma çoklu-onay engeli
+      + red sonrası otomatik fallback. Bir proforma onaylandığında aynı
+      ürünün diğer pending proformaları otomatik `rejected` yapılıyor
+      (`_cancel_sibling_pending_proformas`, Sheet4 mirror'ı bir sonraki
+      run'da İPTAL gösterir). Bir ürün için tüm proforma/tedarikçi yolları
+      tükendiğinde (pending proforma yok VE `rejected` olmayan aktif
+      supplier_contacts yok) `_check_and_requeue_if_exhausted`, paylaşılan
+      `_requeue_product_for_sourcing` helper'ıyla ürünü `approved`'e geri
+      çekiyor. Bunun işlemesi için `tedarikci.py._phase1_supplier_research()`
+      artık sadece `rejected` OLMAYAN kontakları "zaten araştırıldı" sayıyor.
 
-- [ ] **GAP-12 (KARAR VERİLDİ — gerçek yeniden tedarik tetiklenecek):**
-      `siparis.py._check_low_stock()` artık anlamsız yeni bir "ürün"
-      yaratmayacak. Onaylanan restock talebi, AYNI `product_id`'yi tekrar
-      tedarikçi araştırma kuyruğuna sokacak (`iliski_tipi='reorder'`),
-      mümkünse `preferred_suppliers` tablosundan (M5+, var ama kullanılmıyor)
-      bilinen iyi tedarikçi önerilecek.
+- [x] **GAP-12 — TAMAMLANDI (commit `09005b9`, altyapı `a6bab17`):**
+      `orkestrator._process_urun_approvals()` artık `request_type`'a göre
+      dispatch yapıyor (`_handle_product_approval_row` /
+      `_handle_restock_approval_row` / `_handle_return_approval_row`).
+      `siparis.py._check_low_stock()`'un oluşturduğu `restock_request`
+      onaylandığında artık anlamsız yeni bir "ürün" yaratmıyor — AYNI
+      `product_id`'yi `_requeue_product_for_sourcing` ile tekrar tedarikçi
+      araştırma kuyruğuna sokuyor. (`preferred_suppliers` tabanlı tedarikçi
+      önerisi kapsam dışı bırakıldı — M5+ konusu, GAP-12'nin çekirdek amacı
+      olan "duplike ürün yaratma" bug'ı çözüldü.)
 
-- [ ] **GAP-13 (KARAR VERİLDİ — minimal scaffold eklenecek):** Gerçek
-      webhook/API entegrasyonu olmadan otomatik iade algılama mümkün değil.
-      Şimdilik: `approval_queue`'ya yeni `request_type='return_manual'` —
-      Berkin bir iade fark ettiğinde manuel tetikleyebileceği basit bir giriş
-      noktası. Onaylandığında: `orders.status→returned` (GAP-7 sonrası
-      standart kelimeyle), `products.stock_count` geri artırılır,
-      `financials`'a negatif "iade" kaydı düşer. Gerçek otomasyon (webhook)
-      M6'da gerçek API'lerle gelecek.
+- [x] **GAP-13 — TAMAMLANDI (commit `22a8053`):** Gerçek webhook/API
+      entegrasyonu olmadan otomatik iade algılama mümkün değil. Minimal
+      manuel scaffold eklendi: `scripts/manual_return.py --order-id
+      --product-id --quantity`, `approval_queue`'ya
+      `request_type='return_manual'` satırı düşürüyor (mevcut
+      `restock_request` pattern'iyle aynı — Sheet1'e normal mirror'lanır,
+      skor kolonları boş kalır). Onaylandığında `_handle_return_approval_row`
+      + `_process_return_approval`: `orders.status→returned`,
+      `products.stock_count` geri artırılır, `financials`'a negatif "iade"
+      kaydı düşer. Gerçek otomasyon (webhook) M6'da gerçek API'lerle
+      gelecek. **Not:** `financials` insert alanları bu oturumda
+      `agents/finans.py`'nin zaten kullandığı şema (ground truth kabul
+      edildi, Berkin onayıyla) — bkz. güncellenmiş GAP-3.
 
 - [ ] **GAP-14 (Düşük Öncelik — Race Condition):** Sheet3'te (Mail Onay)
       aynı TM-ID'nin (TM-004) iki farklı contact_id için iki kez üretildiği
@@ -274,16 +287,31 @@ Berkin'e sorulacak.
       Postgres sequence veya `INSERT ... RETURNING` ile atomik hale getir,
       ya da tm_id üretimini DB tarafında (default değer / trigger) yap.
 
-Kod implementasyonu ayrı, odaklı Claude Code oturumlarına bölünecek —
-GAP-7 (durum standardizasyonu) her şeyin temeli olduğu için İLK yapılacak,
-diğerleri (GAP-8, GAP-9, GAP-11, GAP-12, GAP-13) ondan sonra bağımsız
-oturumlarda. GAP-10 M5 öncesi zorunlu ama şimdilik backlog'da. GAP-6 küçük
-olduğu için GAP-7 oturumuna bindirilebilir.
+Kod implementasyonu ayrı, odaklı Claude Code oturumlarına bölündü — GAP-7
+(durum standardizasyonu) her şeyin temeli olduğu için İLK yapıldı, GAP-8/9
+sonraki oturumda, GAP-11/12/13 (ortak "ürünü yeniden tedarikçi
+araştırmasına sokma" mekanizmasını paylaştıkları için) aynı oturumda birlikte
+tamamlandı. GAP-10 M5 öncesi zorunlu ama şimdilik backlog'da.
 
-- [ ] **GAP-3:** financials tablosu şema tutarsızlığı — docs/infrastructure/
-      SUPABASE.md ile agents/finans.py kodu farklı alanlar kullanıyor.
-      Supabase'den information_schema.columns ile gerçek şema teyit edilip
-      doküman düzeltilecek.
+- [x] **GAP-3 — KAPATILDI (21 Temmuz 2026, Berkin kararıyla):** financials
+      tablosu şema tutarsızlığı — docs/infrastructure/SUPABASE.md ile
+      agents/finans.py kodu farklı alanlar kullanıyordu. Bu oturumda
+      Supabase'in gerçek `information_schema.columns`'unu sorgulama girişimi
+      yapıldı, ancak bu Claude Code oturumuna bağlı Supabase MCP bağlantısı
+      eticaret-otomasyon projesine (`ypusjrrklxssjvefkypd`) erişemiyor
+      (sadece ilgisiz başka projelere erişimi var) ve repo'da `.env` yok —
+      yani canlı şema bu oturumda BAĞIMSIZ olarak teyit edilemedi. Berkin'e
+      soruldu: `agents/finans.py._write_financials`'ın zaten prodüksiyonda
+      kullandığı alanlar (`week_start`, `month`, `category`, `platform`,
+      `amount_tl`, `description`, `source`, `tax_category`) ground truth
+      kabul edilsin dendi — kod hatasız çalıştığına göre bu alanlar gerçek
+      şemayla eşleşiyor demektir. `docs/infrastructure/SUPABASE.md`'deki
+      `financials` bölümü buna göre güncellendi (aşağıda), eski
+      `category` değer listesi (`gelir_shopify` vb.) YANLIŞ olarak
+      işaretlendi — kodun kullandığı gerçek değerler farklı
+      (`platform_revenue`, banka girişlerinin kendi `category`'si,
+      GAP-13'ün eklediği `iade`). GAP-13'ün financials insert'i de bu
+      ground-truth şemaya göre yazıldı.
 
 - [x] **GAP-4 (BÜYÜK ÖLÇÜDE ÇÖZÜLDÜ — BUG-4, commit `7357f00`):** Tek yazıcı
       artık tedarikci.py. Kalan: GAP-1 ve GAP-2'deki yeni tablolarda da bu
@@ -331,3 +359,4 @@ Faz 3 tamamlanmadan başlamaz. Hazır plan: docs/guides/LOVABLE_MIGRATION_PLAN.m
 | 21 Temmuz 2026 | GAP-6 tamamlandı (commit `06ab94b`), GAP-7 kodu tamamlandı (commit `861e442`, migration script `483b677` — henüz çalıştırılmadı, Berkin onayı bekliyor) |
 | 21 Temmuz 2026 | GAP-7 tam tamamlandı olarak işaretlendi (migration script Berkin tarafından çalıştırıldı, Sheet3'te 5 satır güncellendi), GAP-14 eklendi (TM-ID race condition, düşük öncelik) |
 | 21 Temmuz 2026 | GAP-8 tamamlandı (commit `876e1b0`) — ürün onayı geri alınabilir. GAP-9 tamamlandı (migration `01e4689`, kod `b188275`) — tedarikçi RED'inde onaya tabi red bildirimi maili; `rejection_notice_drafted` migration'ı Berkin onayı bekliyor (Supabase'de manuel çalıştırılacak) |
+| 21 Temmuz 2026 | request_type dispatch altyapısı eklendi (commit `a6bab17`) — `_process_urun_approvals()` artık product_approval/restock_request/return_manual'ı ayrı handler'lara yönlendiriyor. GAP-11 tamamlandı (commit `4b32cdc`) — proforma çoklu-onay engeli + red sonrası otomatik fallback, paylaşılan `_requeue_product_for_sourcing` helper'ı + tedarikci.py Faz 1 kontrolü güncellendi. GAP-12 tamamlandı (commit `09005b9`) — kritik stok onayı artık duplike ürün yaratmıyor, gerçek yeniden tedarik tetikliyor. GAP-13 tamamlandı (commit `22a8053`) — `scripts/manual_return.py` + iade onay handler'ı. GAP-3 kapatıldı — financials şeması bu oturumda Supabase'e erişilemediği için `agents/finans.py` kodu ground truth kabul edilerek (Berkin onayıyla) dokümante edildi. |
