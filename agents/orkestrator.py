@@ -4,7 +4,8 @@
 
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from typing import Optional
 from core.supabase_client import get_client
 from core.logger import get_logger, log_run
 from core.sheets_client import (
@@ -102,18 +103,11 @@ def _process_urun_approvals(sheet_id: str) -> tuple:
     """
     Sheet 1'deki onay/red kararlarını Supabase'e yansıtır.
 
-    GAP-8: Tek yönlü değil — Berkin fikrini değiştirip aksiyonu tersine
-    çevirirse, approval_queue.status'u da tersine çevirir:
-      - approved (Sheet'te ONAY) + Supabase'de hâlâ 'pending' → 'approved' +
-        products satırı oluştur (mevcut davranış).
-      - approved (ONAY) + Supabase'de 'rejected' → 'approved'e geri döndür,
-        daha önce oluşturulmuş products satırı varsa 'approved'e geri çek,
-        yoksa yeniden oluştur.
-      - rejected (RED) + Supabase'de hâlâ 'pending' → 'rejected' (mevcut
-        davranış, products satırı hiç oluşturulmamıştı).
-      - rejected (RED) + Supabase'de 'approved' → 'rejected'e geri döndür,
-        oluşturulan products satırı SİLİNMEZ, 'delisted' yapılır (iz kalır).
-      - Zaten aynı durumdaysa (approved+ONAY veya rejected+RED) no-op.
+    Sheet 1 tek bir yerde karışık request_type'lar taşır (product_approval,
+    restock_request, return_manual, ...) çünkü _mirror_urun_onay_to_sheets
+    approval_queue'nun tamamını yazıyor. Bu fonksiyon SADECE Sheet'ten okuyup
+    her satırı request_type'ına göre doğru handler'a yönlendirir — asıl iş
+    mantığı _handle_*_approval_row fonksiyonlarında.
     """
     if not sheet_id:
         return 0, 0
@@ -131,55 +125,128 @@ def _process_urun_approvals(sheet_id: str) -> tuple:
     for item in approved_list:
         row_id = item["id"]
         try:
-            result = client.table("approval_queue").select("id, status, title").eq("id", row_id).execute()
-            if not result.data:
+            row = _fetch_approval_row(row_id, client)
+            if not row:
                 continue
-            current_status = result.data[0].get("status")
-            title = result.data[0].get("title", "Bilinmeyen ürün")
-            if current_status == "approved":
-                continue  # zaten onaylı, değişiklik yok
-
-            client.table("approval_queue").update({
-                "status": "approved",
-                "decision_note": item.get("note", ""),
-            }).eq("id", row_id).execute()
-
-            if current_status == "rejected":
-                _restore_product_from_approval(row_id, title, client)
-                logger.info(f"Ürün onayı geri alındı: {title} (rejected→approved)")
-            else:
-                _create_product_from_approval(row_id, client)
-                logger.info(f"Ürün onaylandı: {row_id}")
-            approved_count += 1
+            if _dispatch_urun_approval_row(row, item, client, "approved"):
+                approved_count += 1
         except Exception as e:
             logger.error(f"Ürün onay hatası {row_id}: {e}")
 
     for item in rejected_list:
         row_id = item["id"]
         try:
-            result = client.table("approval_queue").select("id, status, title").eq("id", row_id).execute()
-            if not result.data:
+            row = _fetch_approval_row(row_id, client)
+            if not row:
                 continue
-            current_status = result.data[0].get("status")
-            title = result.data[0].get("title", "Bilinmeyen ürün")
-            if current_status == "rejected":
-                continue  # zaten red, değişiklik yok
-
-            client.table("approval_queue").update({
-                "status": "rejected",
-                "decision_note": item.get("note", ""),
-            }).eq("id", row_id).execute()
-
-            if current_status == "approved":
-                _delist_product_from_approval(title, client)
-                logger.info(f"Ürün onayı geri alındı: {title} (approved→rejected)")
-            else:
-                logger.info(f"Ürün reddedildi: {row_id}")
-            rejected_count += 1
+            if _dispatch_urun_approval_row(row, item, client, "rejected"):
+                rejected_count += 1
         except Exception as e:
             logger.error(f"Ürün red hatası {row_id}: {e}")
 
     return approved_count, rejected_count
+
+
+def _fetch_approval_row(row_id: str, client) -> Optional[dict]:
+    result = (
+        client.table("approval_queue")
+        .select("id, status, title, request_type, payload")
+        .eq("id", row_id)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+def _dispatch_urun_approval_row(row: dict, item: dict, client, decision: str) -> bool:
+    """approval_queue satırını request_type'ına göre doğru handler'a yönlendirir."""
+    request_type = row.get("request_type") or "product_approval"
+    if request_type == "restock_request":
+        return _handle_restock_approval_row(row, item, client, decision)
+    if request_type == "return_manual":
+        return _handle_return_approval_row(row, item, client, decision)
+    return _handle_product_approval_row(row, item, client, decision)
+
+
+def _handle_product_approval_row(row: dict, item: dict, client, decision: str) -> bool:
+    """
+    request_type='product_approval' (veya null/eski satırlar için varsayılan).
+
+    GAP-8: Tek yönlü değil — Berkin fikrini değiştirip aksiyonu tersine
+    çevirirse, approval_queue.status'u da tersine çevirir:
+      - approved (Sheet'te ONAY) + Supabase'de hâlâ 'pending' → 'approved' +
+        products satırı oluştur (mevcut davranış).
+      - approved (ONAY) + Supabase'de 'rejected' → 'approved'e geri döndür,
+        daha önce oluşturulmuş products satırı varsa 'approved'e geri çek,
+        yoksa yeniden oluştur.
+      - rejected (RED) + Supabase'de hâlâ 'pending' → 'rejected' (mevcut
+        davranış, products satırı hiç oluşturulmamıştı).
+      - rejected (RED) + Supabase'de 'approved' → 'rejected'e geri döndür,
+        oluşturulan products satırı SİLİNMEZ, 'delisted' yapılır (iz kalır).
+      - Zaten aynı durumdaysa (approved+ONAY veya rejected+RED) no-op.
+    """
+    row_id = row["id"]
+    current_status = row.get("status")
+    title = row.get("title", "Bilinmeyen ürün")
+
+    if decision == "approved":
+        if current_status == "approved":
+            return False  # zaten onaylı, değişiklik yok
+
+        client.table("approval_queue").update({
+            "status": "approved",
+            "decision_note": item.get("note", ""),
+        }).eq("id", row_id).execute()
+
+        if current_status == "rejected":
+            _restore_product_from_approval(row_id, title, client)
+            logger.info(f"Ürün onayı geri alındı: {title} (rejected→approved)")
+        else:
+            _create_product_from_approval(row_id, client)
+            logger.info(f"Ürün onaylandı: {row_id}")
+        return True
+
+    if current_status == "rejected":
+        return False  # zaten red, değişiklik yok
+
+    client.table("approval_queue").update({
+        "status": "rejected",
+        "decision_note": item.get("note", ""),
+    }).eq("id", row_id).execute()
+
+    if current_status == "approved":
+        _delist_product_from_approval(title, client)
+        logger.info(f"Ürün onayı geri alındı: {title} (approved→rejected)")
+    else:
+        logger.info(f"Ürün reddedildi: {row_id}")
+    return True
+
+
+def _handle_restock_approval_row(row: dict, item: dict, client, decision: str) -> bool:
+    """request_type='restock_request'. Bkz. GAP-12."""
+    row_id = row["id"]
+    current_status = row.get("status")
+    if current_status == decision:
+        return False
+
+    client.table("approval_queue").update({
+        "status": decision,
+        "decision_note": item.get("note", ""),
+    }).eq("id", row_id).execute()
+    return True
+
+
+def _handle_return_approval_row(row: dict, item: dict, client, decision: str) -> bool:
+    """request_type='return_manual'. Bkz. GAP-13."""
+    row_id = row["id"]
+    current_status = row.get("status")
+    if current_status == decision:
+        return False
+
+    client.table("approval_queue").update({
+        "status": decision,
+        "decision_note": item.get("note", ""),
+    }).eq("id", row_id).execute()
+    return True
 
 
 def _create_product_from_approval(approval_id: str, client):
