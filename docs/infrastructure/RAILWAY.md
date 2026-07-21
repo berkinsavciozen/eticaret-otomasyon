@@ -2,7 +2,7 @@
 
 ## Servis Yapısı
 
-Tek repo, tek `railway.toml`, 3 aktif servis (M4 itibarıyla).
+Tek repo, tek `railway.toml`, 4 aktif servis (Temmuz 2026 itibarıyla).
 
 ```
 railway.toml:
@@ -13,16 +13,16 @@ Her servis kendi `AGENT_NAME` env var'ını Railway Variables'ta tanımlar.
 
 | Railway Servisi | AGENT_NAME | Cron | Durum |
 |-----------------|------------|------|-------|
-| eticaret-orkestrator | `orkestrator` | `*/30 * * * *` | ✅ Aktif |
+| eticaret-orkestrator | `orkestrator` | `0 7,19 * * *` | ✅ Aktif — bilerek düşürüldü (Faz 3 stabilize olunca eski sıklığa dönülmesi değerlendirilecek) |
 | eticaret-firsatci | `firsatci` | `0 6,18 * * *` | ✅ Aktif |
 | eticaret-tedarikci | `tedarikci` | `0 * * * *` | ✅ Aktif |
+| eticaret-operations | `operations` | — | ✅ Aktif — Mock modda çalışıyor, bilerek pause edilmedi (21 Temmuz 2026 kararı) |
 
 > ⚠️ `railway.toml` içindeki cron comment'leri eski değerleri gösteriyor (stale). Gerçek schedule'lar Railway Variables/Settings'te tanımlıdır.
 
 ## Healthchecks.io Monitoring
 
-**Mevcut sorun:** Orkestratör 30 dakikada çalıştığı halde Healthchecks.io period'u hâlâ 15 dakika.  
-**Fix:** Healthchecks.io dashboard'da period'u **35 dakikaya** çek (30 dk + 5 dk buffer).
+✅ Çözüldü — Healthchecks.io period'u orkestratörün çalışma sıklığına uygun şekilde **35 dakikaya** çekildi (30 dk + 5 dk buffer).
 
 ## Env Var Listesi
 
@@ -58,11 +58,10 @@ Tedarikçi'ye özel:
 
 ## Gmail OAuth Refresh Token Yenileme
 
-`GMAIL_REFRESH_TOKEN` Google Cloud OAuth app "Testing" modunda iken **7 günde bir** expires.
+✅ Çözüldü — Google Cloud OAuth app Production'a alındı, `GMAIL_REFRESH_TOKEN`
+artık 7 günde bir expire olmuyor.
 
-**Kalıcı fix:** Google Cloud Console → OAuth consent screen → "PUBLISH APP" (Production'a al)
-
-Ardından yeni token üretme adımları:
+Token yine de yenilenmesi gerekirse (ör. scope değişikliği) aşağıdaki adımlar geçerli:
 
 ```bash
 pip install google-auth-oauthlib
