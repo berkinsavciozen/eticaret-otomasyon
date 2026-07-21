@@ -145,7 +145,7 @@ Berkin'e sorulacak.
       döndürüyor. Gmail hatırlatma maili artık doğru bekleyen sayısını
       gösteriyor.
 
-- [x] **GAP-7 (TEMEL, KARAR VERİLDİ) — KOD TAMAMLANDI, MİGRASYON BEKLİYOR
+- [x] **GAP-7 (TEMEL, KARAR VERİLDİ) — TAMAMLANDI
       (21 Temmuz 2026, commit `861e442` + script `483b677`):**
       Durum sözlüğü standardizasyonu. Şu an her sheet'te farklı durum
       kelimeleri var (beklemede/onaylandı/reddedildi, pending/sent/approved,
@@ -168,19 +168,16 @@ Berkin'e sorulacak.
          tüm 4 sheet'in approval-okuma fonksiyonunda kullanılıyor.
       2. [x] `_setup_validations()`'daki dropdown value listeleri yeni
          standarda göre güncellendi.
-      3. [x] **Migration script'i YAZILDI, `--dry-run` ile mock veriyle test
-         edildi, ama gerçek spreadsheet'e (ID:
-         1HfRKYMah7HcawCjmSYjE7OXMtOuvHQVJ25GH5zcTmvw) KARŞI HENÜZ
-         ÇALIŞTIRILMADI** — `scripts/migrate_status_vocabulary.py`
-         (commit `483b677`). Bu oturumda Railway/Sheets credential'ları
-         mevcut değildi, o yüzden gerçek çalıştırma Berkin'in onayı +
-         kendi ortamında (veya credential'ları olan bir sonraki oturumda)
-         yapılması gerekiyor. Çalıştırılana kadar canlı sheet'te eski
-         kelimeler (Sheet1 "onaylandı"/"reddedildi", Sheet2 "tamamlandı",
-         Sheet3 "sent"/"pending", Sheet4 "ONAY") durmaya devam eder — kod
-         hem yeni hem eski kelimeleri okuyabildiği için (geriye dönük
-         uyumluluk) bu functional bir sorun yaratmaz, sadece görünüm
-         migrasyon çalışana kadar karışık kalır.
+      3. [x] Migration script'i (scripts/migrate_status_vocabulary.py) Berkin
+         tarafından local ortamında çalıştırıldı (21 Temmuz 2026). Sonuç: Sheet1
+         (0 satır — periyodik mirror zaten normalize etmişti), Sheet2 (0 satır —
+         aynı sebep), Sheet3 (5 satır güncellendi — bu sheet'in periyodik mirror'ı
+         olmadığı için gerçekten gerekliydi: sent→TAMAMLANDI, pending→BEKLEMEDE),
+         Sheet4 (0 satır — mirror_proforma_onay zaten normalize etmişti). Sheet1/2/4
+         dual-purpose kolonlar olduğu için (Berkin'in yazdığı ONAY/RED kalıcı
+         değil — bir sonraki orkestratör cron'unda otomatik olarak sistem durumuna
+         çevriliyor) bu üç sheet'te gözlemlenen herhangi bir 'eski görünüm' bir
+         sonraki mirror'da kendiliğinden düzelir, ekstra aksiyon gerekmez.
       4. [x] **TASARIM KARARI:** Supabase tablolarındaki iç status
          değerleri (`products.status`, `supplier_contacts.status`,
          `approval_queue.status`, `mail_approvals.onay_durumu`,
@@ -248,6 +245,24 @@ Berkin'e sorulacak.
       `financials`'a negatif "iade" kaydı düşer. Gerçek otomasyon (webhook)
       M6'da gerçek API'lerle gelecek.
 
+- [ ] **GAP-14 (Düşük Öncelik — Race Condition):** Sheet3'te (Mail Onay)
+      aynı TM-ID'nin (TM-004) iki farklı contact_id için iki kez üretildiği
+      gözlemlendi (21 Temmuz 2026, iki satır 1 dakika arayla oluşturulmuş).
+      Kök sebep muhtemelen `agents/tedarikci.py` → `_get_next_tm_id()`'nin
+      `supplier_contacts` tablosundaki mevcut `tm_id` sayısını sayıp +1
+      yaparak yeni ID üretmesi — eğer `_phase2_send_test_mails()` aynı anda
+      (veya çok kısa aralıkla) iki kez tetiklenirse (örn. manuel + cron
+      çakışması, ya da aynı cron run içinde iki ürün için art arda çağrılırken
+      ikisi de sayıyı DB'ye yazılmadan önce okursa) aynı sayı üretilebilir.
+      Şu an ZARARSIZ (iki satır farklı contact_id'ye işaret ediyor, karışıklık
+      yaratmıyor) ama TM-ID'nin unique olması beklentisini bozuyor
+      (mail_approvals.tm_id UNIQUE constraint'i bir gün bu yüzden insert
+      hatası verebilir — upsert on_conflict='tm_id' kullanıldığı için şu an
+      ikinci satır ilkinin üzerine yazıyor olabilir, bu da veri kaybına yol
+      açabilir). Düzeltme: `_get_next_tm_id()`'yi count-based yerine
+      Postgres sequence veya `INSERT ... RETURNING` ile atomik hale getir,
+      ya da tm_id üretimini DB tarafında (default değer / trigger) yap.
+
 Kod implementasyonu ayrı, odaklı Claude Code oturumlarına bölünecek —
 GAP-7 (durum standardizasyonu) her şeyin temeli olduğu için İLK yapılacak,
 diğerleri (GAP-8, GAP-9, GAP-11, GAP-12, GAP-13) ondan sonra bağımsız
@@ -303,3 +318,4 @@ Faz 3 tamamlanmadan başlamaz. Hazır plan: docs/guides/LOVABLE_MIGRATION_PLAN.m
 | 21 Temmuz 2026 | Konsolidasyon: ONBOARDING.md silindi, PENDING_FIXES.md → ROADMAP_TODO.md, GAP-1..5 eklendi, BUG-3/4/5 tamamlandı, GAP-2 kararı verildi (şimdi implemente edilecek), eticaret-operations kararı verildi (mock modda devam) |
 | 21 Temmuz 2026 | GAP-6..13 eklendi (mimari analiz + forklar netleştirildi), GAP-1/2 migration'ları uygulandı olarak işaretlendi, şirket kurulmadan önce güvenlik notu eklendi |
 | 21 Temmuz 2026 | GAP-6 tamamlandı (commit `06ab94b`), GAP-7 kodu tamamlandı (commit `861e442`, migration script `483b677` — henüz çalıştırılmadı, Berkin onayı bekliyor) |
+| 21 Temmuz 2026 | GAP-7 tam tamamlandı olarak işaretlendi (migration script Berkin tarafından çalıştırıldı, Sheet3'te 5 satır güncellendi), GAP-14 eklendi (TM-ID race condition, düşük öncelik) |
