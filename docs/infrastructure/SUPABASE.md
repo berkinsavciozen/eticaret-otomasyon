@@ -79,6 +79,13 @@ ALTER TABLE supplier_contacts ENABLE ROW LEVEL SECURITY;
 
 Status akışı: `candidate → approved → sourcing → sourced → listed → delisted`
 
+> **GAP-8 notu:** `delisted` artık iki anlamda kullanılıyor: (1) orijinal
+> anlamı — aktif bir listing durdurulduğunda; (2) Berkin bir ürün onayını
+> Sheet 1'de sonradan RED'e çevirdiğinde (`orkestrator._delist_product_from_approval`)
+> — "iptal edilen onay" anlamında, oluşturulan `products` satırı silinmeden
+> terminal duruma çekilir (iz kalır). RED→ONAY'a geri dönülürse aynı satır
+> `approved`'e geri döndürülür (`_restore_product_from_approval`).
+
 Önemli alanlar: `score`, `cogs_tl`, `target_price_tl`, `supplier_id`, `stock_count`, `critical_stock_threshold` (default 5), `shopify_product_id`, `trendyol_barcode`
 
 ### `supplier_contacts` — Tedarikçi iletişim geçmişi
