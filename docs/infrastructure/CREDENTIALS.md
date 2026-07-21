@@ -33,7 +33,7 @@
 |-----|--------|-----------|-----|
 | `GMAIL_CLIENT_ID` | ✅ | E-Ticaret - Gmail OAuth | — |
 | `GMAIL_CLIENT_SECRET` | ✅ | E-Ticaret - Gmail OAuth | — |
-| `GMAIL_REFRESH_TOKEN` | ✅ | E-Ticaret - Gmail OAuth | ⚠️ 7 günde expire — bkz. RAILWAY.md |
+| `GMAIL_REFRESH_TOKEN` | ✅ | E-Ticaret - Gmail OAuth | ✅ Production modda — artık 7 günde expire olmuyor, bkz. RAILWAY.md |
 
 **M1 Kritik: 7 / 7 tamamlandı ✅**
 
@@ -68,7 +68,7 @@
 ### İzleme
 | Key | Alındı | Not |
 |-----|--------|-----|
-| `UPTIMEROBOT_CRON_PING_URL` | ☐ | Period'u 35 dk olarak ayarla |
+| `HEALTHCHECKS_PING_URL` | ✅ | Period 35 dk olarak ayarlandı |
 
 ---
 
