@@ -17,9 +17,7 @@
 
 ## RLS Durumu
 
-**Güvenlik açığı:** Tüm tablolar public erişime açık (`rls_disabled_in_public`).
-
-Etkinleştirmek için SQL Editor'de çalıştır:
+✅ RLS 9 tabloda etkinleştirildi (21 Temmuz 2026).
 
 ```sql
 ALTER TABLE agent_tasks ENABLE ROW LEVEL SECURITY;
@@ -85,11 +83,28 @@ Status akışı: `candidate → approved → sourcing → sourced → listed →
 
 ### `supplier_contacts` — Tedarikçi iletişim geçmişi
 
-Status akışı: `research_found → approved → sent → followup_sent`
+Status akışı: `research_found → approved → test_sent → inquiry_sent → followup_sent`
 
 Önemli alanlar: `tm_id` (TM-001 formatı), `supplier_name`, `contact_email`, `email_body`, `contacted_at`
 
 > **M5+ TOKEN OPT-1:** `email_body` kolonu eklenecek — bir kez üretilen mail body cache'lenecek.
+
+### `mail_approvals` — Mail Onay source-of-truth (M4, GAP-1)
+
+Sheet 3'ün (Mail Onay) Supabase karşılığı. `tedarikci.py` dual-write yapar:
+Sheets kullanıcı arayüzü, bu tablo gerçek kaynak. Önemli alanlar: `tm_id`
+(unique), `product_id`, `supplier_contact_id`, `onay_durumu`
+(`pending`/`approved`/`sent`), `gmail_yaniti_alindi`.
+
+### `proforma_offers` — Proforma teklifleri (M4, GAP-2)
+
+Sheet 4'ün (Proforma Onay) Supabase karşılığı. `tedarikci.py` Faz 5'te
+insert edilir (mock kontaklarda sentetik, gerçek kontaklarda Gmail yanıtından
+Claude Haiku ile çıkarılmış veri). Onaylandığında orkestratör `products.status`'u
+`sourcing → sourced`, ilgili `supplier_contacts.status`'u `completed` yapar.
+Önemli alanlar: `product_id`, `supplier_contact_id`, `teklif_fiyat_usd`, `moq`,
+`teslim_sure_gun`, `tahmini_cogs_tl`, `tahmini_marj_pct`,
+`firsatci_tahmini_fark_tl`, `status` (`pending`/`approved`/`rejected`), `mock`.
 
 ### `orders` — Sipariş kayıtları
 
@@ -98,6 +113,10 @@ Status: `new → shipped → delivered` / `return_requested → returned`
 ### `financials` — Gelir/gider kayıtları
 
 `amount_tl`: gelir pozitif, gider negatif. `category` alanı için değerler: `gelir_shopify`, `gelir_trendyol`, `cogs`, `komisyon_trendyol`, `kargo`, `reklam`, `sabit_gider`, `banka_hareketi`, `kdv_yukumlulugu`
+
+> **GAP-3 (açık):** Bu bölümdeki şema ile `agents/finans.py` kodunun kullandığı
+> alanlar arasında tutarsızlık var. Supabase'den `information_schema.columns`
+> ile gerçek şema teyit edilip bu bölüm düzeltilecek — bkz. ROADMAP_TODO.md.
 
 ### `preferred_suppliers` — Başarılı tedarikçi hafızası (M5+)
 
