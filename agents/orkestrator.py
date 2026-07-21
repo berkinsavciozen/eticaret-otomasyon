@@ -48,7 +48,7 @@ def run():
         proforma_approved, _ = _process_proforma_approvals_step(sheet_id)
 
         # 2. Bekleyen onayları say
-        pending_counts = _check_pending_approvals()
+        pending_counts = _check_pending_approvals(sheet_id)
 
         # 3. Sheet 1, 2 ve 4'ü Supabase'den tazele
         _mirror_urun_onay_to_sheets(sheet_id)
@@ -435,23 +435,53 @@ def _refresh_dashboard_step(sheet_id: str, pending_counts: dict):
 
 # ── Pending approval sayıları ─────────────────────────────────────────────────
 
-def _check_pending_approvals() -> dict:
+def _check_pending_approvals(sheet_id: str = None) -> dict:
+    """
+    Bekleyen onay sayılarını döner (GAP-6). Gmail hatırlatma maili bu sayıları
+    kullanır — dashboard'daki pending sayaçlarından (BUG-3, _refresh_dashboard_step)
+    AYRI bir fonksiyon, o yüzden burada da gerçek veriden okunması gerekiyor.
+    """
     client = get_client()
-    pending = (
+    urun_pending = (
         client.table("approval_queue")
         .select("id")
         .eq("status", "pending")
         .execute()
     )
-    count = len(pending.data)
+    urun_count = len(urun_pending.data)
+
+    tedarikci_count = 0
+    try:
+        tedarikci_pending = (
+            client.table("supplier_contacts")
+            .select("id")
+            .eq("status", "research_found")
+            .execute()
+        )
+        tedarikci_count = len(tedarikci_pending.data)
+    except Exception as e:
+        logger.warning(f"Tedarikçi bekleyen sayısı alınamadı: {e}")
+
+    mail_count = proforma_count = 0
+    if sheet_id:
+        try:
+            mail_count, _ = get_mail_onay_status_counts(sheet_id)
+        except Exception as e:
+            logger.warning(f"Mail bekleyen sayısı alınamadı: {e}")
+        try:
+            proforma_count, _ = get_proforma_onay_status_counts(sheet_id)
+        except Exception as e:
+            logger.warning(f"Proforma bekleyen sayısı alınamadı: {e}")
+
     counts = {
-        "urun": count,
-        "tedarikci": 0,  # M4'te dolar
-        "mail": 0,       # M4'te dolar
-        "proforma": 0,   # M4'te dolar
+        "urun": urun_count,
+        "tedarikci": tedarikci_count,
+        "mail": mail_count,
+        "proforma": proforma_count,
     }
-    if count > 0:
-        logger.info(f"{count} bekleyen ürün onayı var")
+    total = sum(counts.values())
+    if total > 0:
+        logger.info(f"Bekleyen onaylar: {counts}")
     else:
         logger.info("Bekleyen onay yok")
     return counts
