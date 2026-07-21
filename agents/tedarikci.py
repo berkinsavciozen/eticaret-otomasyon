@@ -250,7 +250,7 @@ def _phase2_send_test_mails(sheet_id: Optional[str]) -> int:
         tm_id = _get_next_tm_id(client)
 
         # Test maili gönder
-        success = _send_test_mail(product, sc, tm_id)
+        success, email_body = _send_test_mail(product, sc, tm_id)
         if not success:
             continue
 
@@ -267,13 +267,15 @@ def _phase2_send_test_mails(sheet_id: Optional[str]) -> int:
         if sheet_id:
             try:
                 append_mail_onay(sheet_id, {
-                    "tm_id":          tm_id,
-                    "product_id":     str(sc["product_id"]),
-                    "product_title":  product.get("name", ""),
-                    "supplier_name":  sc.get("supplier_name", ""),
-                    "mail_turu":      "ilk_temas",
-                    "test_gonderildi": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
-                    "not":            f"Tedarikçi: {sc.get('platform','alibaba')} | contact_id:{contact_id}",
+                    "tm_id":               tm_id,
+                    "product_id":          str(sc["product_id"]),
+                    "product_title":       product.get("name", ""),
+                    "supplier_name":       sc.get("supplier_name", ""),
+                    "supplier_contact_id": contact_id,
+                    "mail_turu":           "ilk_temas",
+                    "email_body":          email_body,
+                    "test_gonderildi":     datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                    "not":                 f"Tedarikçi: {sc.get('platform','alibaba')} | contact_id:{contact_id}",
                 })
             except Exception as e:
                 logger.warning(f"Faz 2: Sheet 3 append hatası: {e}")
@@ -682,15 +684,16 @@ Write only the email body. Keep under 200 words. Professional, friendly tone."""
     return resp.content[0].text.strip()
 
 
-def _send_test_mail(product: dict, supplier_contact: dict, tm_id: str) -> bool:
+def _send_test_mail(product: dict, supplier_contact: dict, tm_id: str) -> Tuple[bool, str]:
     """
     Test mailini NOTIFICATION_EMAIL'e gönderir (Berkin'in Gmail'i).
     Konu: [TM-XXX] Product Inquiry: {ürün} — {tedarikçi}
     MOCK_SUPPLIER_EMAIL'e değil — bu sadece onay için.
+    Returns: (başarılı mı, üretilen mail gövdesi)
     """
     if not TEST_MAIL_TO:
         logger.warning("TEST_MAIL_TO (NOTIFICATION_EMAIL) tanımlı değil")
-        return False
+        return False, ""
 
     try:
         product_name    = product.get("name", "Ürün")
@@ -722,11 +725,11 @@ ya da bu maili yanıtlayın.
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         service.users().messages().send(userId="me", body={"raw": raw}).execute()
         logger.info(f"Test maili gönderildi: [{tm_id}] → {TEST_MAIL_TO}")
-        return True
+        return True, email_body
 
     except Exception as e:
         logger.error(f"Test mail gönderilemedi ({tm_id}): {e}")
-        return False
+        return False, ""
 
 
 def _send_real_inquiry_email(product: dict, supplier_contact: dict) -> bool:

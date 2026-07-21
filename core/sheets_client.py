@@ -12,6 +12,8 @@ from typing import Optional, List, Dict, Any
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
+from core.supabase_client import get_client as _get_supabase_client
+
 
 # ── Sheet sekme isimleri ───────────────────────────────────────────────────────
 TAB_URUN_ONAY       = "Ürün Onay"
@@ -615,7 +617,12 @@ def process_tedarikci_onay_approvals(spreadsheet_id: str) -> tuple:
 # ── Sheet 3: Mail Onay ────────────────────────────────────────────────────────
 
 def append_mail_onay(spreadsheet_id: str, row_data: Dict[str, Any]):
-    """Mail Onay sheet'ine test mail kaydı ekler."""
+    """
+    Mail Onay sheet'ine test mail kaydı ekler.
+    Dual-write (GAP-1): aynı kayıt mail_approvals (Supabase) tablosuna da yazılır.
+    Sheets kullanıcı arayüzü, Supabase gerçek kaynak (tek yazıcı burası —
+    BUG-4'teki prensiple tutarlı).
+    """
     new_row = [
         row_data.get("tm_id", ""),           # TM-001 formatı
         str(row_data.get("product_id", "")),
@@ -630,6 +637,27 @@ def append_mail_onay(spreadsheet_id: str, row_data: Dict[str, Any]):
         row_data.get("not", ""),
     ]
     append_to_sheet(spreadsheet_id, f"'{TAB_MAIL_ONAY}'!A1", [new_row])
+    _upsert_mail_approval(row_data)
+
+
+def _upsert_mail_approval(row_data: Dict[str, Any]):
+    """mail_approvals tablosuna tm_id üzerinden insert/upsert eder."""
+    tm_id = row_data.get("tm_id", "")
+    if not tm_id:
+        return
+    try:
+        client = _get_supabase_client()
+        client.table("mail_approvals").upsert({
+            "tm_id":                tm_id,
+            "product_id":           row_data.get("product_id") or None,
+            "supplier_contact_id":  row_data.get("supplier_contact_id") or None,
+            "mail_turu":            row_data.get("mail_turu", "ilk_temas"),
+            "email_body":           row_data.get("email_body"),
+            "test_gonderildi_at":   row_data.get("test_gonderildi") or None,
+            "note":                 row_data.get("not", ""),
+        }, on_conflict="tm_id").execute()
+    except Exception:
+        pass  # Supabase yazımı ikincil — Sheets birincil arayüz olarak çalışmaya devam eder
 
 
 def check_mail_onay_approvals(spreadsheet_id: str) -> List[Dict[str, Any]]:
@@ -660,7 +688,27 @@ def check_mail_onay_approvals(spreadsheet_id: str) -> List[Dict[str, Any]]:
                 "product_title": row[M_URUN_BASLIK] if len(row) > M_URUN_BASLIK else "",
                 "supplier_name": row[M_TEDARIKCI_ADI] if len(row) > M_TEDARIKCI_ADI else "",
             })
+            _sync_mail_approval_status(tm_id, onay_durumu="approved",
+                                        excel_onay=excel_ok or None,
+                                        gmail_yaniti_alindi=bool(gmail_ok))
     return approved
+
+
+def _sync_mail_approval_status(tm_id: str, **fields):
+    """
+    mail_approvals tablosunda tm_id eşleşen kaydı günceller (dual-write).
+    Sheets'te değişen durum buraya da yansıtılır; Sheets birincil arayüz kalır.
+    """
+    if not tm_id:
+        return
+    update_data = {k: v for k, v in fields.items() if v is not None}
+    if not update_data:
+        return
+    try:
+        client = _get_supabase_client()
+        client.table("mail_approvals").update(update_data).eq("tm_id", tm_id).execute()
+    except Exception:
+        pass  # Supabase yazımı ikincil
 
 
 def update_mail_onay_status(spreadsheet_id: str, row_num: int,
@@ -675,6 +723,12 @@ def update_mail_onay_status(spreadsheet_id: str, row_num: int,
     row[M_GERCEK_GONDERIM] = gercek_gonderim or row[M_GERCEK_GONDERIM]
     row[M_NOT]             = note or row[M_NOT]
     update_row(spreadsheet_id, TAB_MAIL_ONAY, row_num, row)
+    _sync_mail_approval_status(
+        row[M_TM_ID],
+        onay_durumu=status,
+        gercek_gonderim_at=gercek_gonderim,
+        note=note,
+    )
 
 
 # ── Sheet 4: Proforma Onay ────────────────────────────────────────────────────
@@ -747,6 +801,22 @@ def get_mail_onay_status_counts(spreadsheet_id: str) -> tuple:
             pending += 1
         elif status in APPROVED_VALUES:
             approved += 1
+    return pending, approved
+
+
+def get_mail_onay_status_counts_supabase() -> tuple:
+    """
+    mail_approvals tablosundan (pending, approved) sayılarını döner.
+    get_mail_onay_status_counts()'un Sheets'e bağımlı olmayan eşdeğeri.
+    """
+    try:
+        client = _get_supabase_client()
+        rows = client.table("mail_approvals").select("onay_durumu").execute()
+    except Exception:
+        return 0, 0
+
+    pending = sum(1 for r in rows.data if r.get("onay_durumu") == "pending")
+    approved = sum(1 for r in rows.data if r.get("onay_durumu") in ("approved", "sent"))
     return pending, approved
 
 
