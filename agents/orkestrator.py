@@ -222,7 +222,16 @@ def _handle_product_approval_row(row: dict, item: dict, client, decision: str) -
 
 
 def _handle_restock_approval_row(row: dict, item: dict, client, decision: str) -> bool:
-    """request_type='restock_request'. Bkz. GAP-12."""
+    """
+    request_type='restock_request' (GAP-12) — siparis.py._check_low_stock()
+    tarafından eklenir, payload={'product_id':..., 'stock_count':...}.
+
+    ONAY: YENİ bir products satırı YARATMAZ — aynı product_id'yi
+    _requeue_product_for_sourcing ile 'approved'e geri çeker, böylece
+    tedarikci.py Faz 1 bir sonraki run'da onu tekrar işleyip yeni tedarikçi
+    adayları bulur.
+    RED: approval_queue satırı 'rejected' yapılır, ürüne dokunulmaz.
+    """
     row_id = row["id"]
     current_status = row.get("status")
     if current_status == decision:
@@ -232,6 +241,14 @@ def _handle_restock_approval_row(row: dict, item: dict, client, decision: str) -
         "status": decision,
         "decision_note": item.get("note", ""),
     }).eq("id", row_id).execute()
+
+    if decision == "approved":
+        payload = row.get("payload") or {}
+        product_id = payload.get("product_id")
+        if product_id:
+            _requeue_product_for_sourcing(product_id, client, "kritik stok")
+        else:
+            logger.warning(f"restock_request satırında product_id yok: {row_id}")
     return True
 
 
