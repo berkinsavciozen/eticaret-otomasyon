@@ -33,8 +33,30 @@ yarım kalmamalı.
       stabilize olunca eski sıklığa dönülmesi değerlendirilecek)
 - [x] **KARAR (21 Temmuz 2026):** `eticaret-operations` mock modda çalışmaya
       DEVAM EDECEK — pause edilmeyecek, mock veri üretmesi şu an sorun değil.
+- [x] GAP-1 ve GAP-2 SQL migration'ları (004_mail_approvals.sql,
+      005_proforma_offers.sql) Berkin tarafından Supabase'e UYGULANDI (21 Temmuz
+      2026). mail_approvals ve proforma_offers tabloları artık canlı.
 
 ## Faz 2 — Source-of-Truth Boşlukları (mimari analizden, 21 Temmuz 2026) 🔲 SIRADA
+
+## ⚠️ Güvenlik Notu — Şirket Henüz Kurulmadı
+
+Şahıs şirketi kaydı tamamlanana kadar (bkz. guides/SETUP.md Faz 0) gerçek
+tedarikçiye mail gitmemeli, Trendyol/Shopify gerçek API bağlantısı
+kurulmamalı. Sistem şu an bunu yapısal olarak zaten sağlıyor:
+- MOCK_SUPPLIER_EMAIL env var'ı devrede olduğu sürece 'gerçek' tedarikçi
+  maili dahi Berkin'in kendi adresine gider (agents/tedarikci.py
+  _send_real_inquiry_email).
+- MOCK_LISTING / MOCK_ORDERS / MOCK_FINANCIALS flag'leri Trendyol/Shopify
+  gerçek çağrılarını engelliyor.
+- GAP-9 (red maili), GAP-11 (proforma fallback), GAP-12 (kritik stok
+  reorder) gibi yeni eklenecek akışların HİÇBİRİ bu güvenlik katmanını
+  atlamaz — hepsi mevcut mock/onay akışının içinde kalır.
+
+KURAL: Şirket kurulana kadar MOCK_SUPPLIER_EMAIL, MOCK_LISTING, MOCK_ORDERS,
+MOCK_FINANCIALS Railway'de KALDIRILMAYACAK. Bu değişikliklerin hiçbiri bu
+flag'lere dokunmayı gerektirmiyor — dokunan bir kod önerisi çıkarsa önce
+Berkin'e sorulacak.
 
 - [ ] **GAP-1 (Öncelik 1 — Mail Onay):** Sheet 3'ün Supabase'de karşılığı yok.
 
@@ -116,6 +138,100 @@ yarım kalmamalı.
          artık gerçekten besleneceğini doğrula — bu Faz 3'te E2E test
          edilecek.
 
+- [ ] **GAP-6 (Küçük):** `orkestrator._check_pending_approvals()` (Gmail
+      hatırlatma mailinin kullandığı sayaç — BUG-3'ün düzelttiği dashboard
+      sayacından FARKLI bir fonksiyon) hâlâ tedarikçi/mail/proforma için
+      hardcoded 0 döndürüyor (`# M4'te dolar` yorumu). Gmail hatırlatma
+      maili bu yüzden gerçek bekleyen sayısını göstermiyor.
+      `get_mail_onay_status_counts()` / `get_proforma_onay_status_counts()`
+      buraya da uygulanmalı.
+
+- [ ] **GAP-7 (TEMEL — diğer her şeyden ÖNCE yapılmalı, KARAR VERİLDİ):**
+      Durum sözlüğü standardizasyonu. Şu an her sheet'te farklı durum
+      kelimeleri var (beklemede/onaylandı/reddedildi, pending/sent/approved,
+      research_found/inquiry_sent/completed vb.) — bunlar TEK bir standart
+      kelime setine indirilecek:
+
+      - Aksiyon dropdown'u (Berkin'in yazdığı, TÜM sheet'lerde aynı):
+        BEKLEMEDE, ONAY, RED — her zaman geri yazılabilir.
+      - Sistem Durumu dropdown'u (sistemin yazdığı, TÜM sheet'lerde aynı):
+        BEKLEMEDE, İŞLENİYOR, TAMAMLANDI, İPTAL
+      - Alt-aşama detayı (hangi mail gönderildi, Gmail yanıtı geldi mi vb.)
+        dropdown'dan kaldırılıp her sheette zaten var olan "Not" kolonuna
+        serbest metin olarak taşınacak.
+
+      Kapsam:
+      1. `core/sheets_client.py`'deki TÜM `STATUS_MAP` sözlüklerini bu tek
+         standarda göre yeniden yaz (Sheet1/2/3/4 hepsi).
+      2. `_setup_validations()`'daki dropdown value listelerini güncelle.
+      3. **VERİ MİGRASYONU GEREKİYOR** — spreadsheet'te (ID:
+         1HfRKYMah7HcawCjmSYjE7OXMtOuvHQVJ25GH5zcTmvw) şu an canlı veride
+         eski kelimeler var (örn. Sheet1'de "onaylandı"/"reddedildi",
+         Sheet2'de "tamamlandı", Sheet3'te "sent"/"pending", Sheet4'te
+         "ONAY"). Tek seferlik bir migration script'i (`scripts/` klasörü
+         altında, `migrate_status_vocabulary.py` gibi) yaz — her 4 sheet'i
+         okuyup eski değerleri yeni standarda çevirip geri yazsın. SQL
+         migration değil, Sheets API üzerinden bir Python script olacak
+         (mevcut `core/sheets_client.py` fonksiyonlarını kullanabilir).
+         ÇALIŞTIRMADAN ÖNCE script'i göster, onay iste.
+      4. Supabase tablolarındaki (`products.status`, `supplier_contacts.status`,
+         `approval_queue.status`, `mail_approvals.onay_durumu`,
+         `proforma_offers.status`) durum değerlerinin de bu yeni standarda
+         göre güncellenip güncellenmeyeceğine dair NOT ekle (büyük ihtimalle
+         Supabase içi teknik status'lar aynı kalabilir — sadece Sheets
+         görünümü standardize ediliyor olabilir; bu netleşmesi gereken bir
+         tasarım kararı, GAP-7'nin kod oturumunda kararlaştırılacak).
+
+- [ ] **GAP-8 (KARAR VERİLDİ — geri alınabilir yapılacak):** Ürün onayı
+      artık tek yönlü değil. Berkin ONAY yazdıktan sonra fikrini değiştirip
+      RED yazarsa: oluşturulan `products` kaydı silinmez, durumu (GAP-7
+      sonrası) İPTAL'e çekilir (iz kalır). RED'den ONAY'a dönerse de aynı
+      şekilde tersine işlesin. `orkestrator._process_urun_approvals()`'ın
+      "sadece hâlâ pending olanı işle" mantığı kaldırılıp her yönde durum
+      senkronu yapacak şekilde güncellenecek.
+
+- [ ] **GAP-9 (KARAR VERİLDİ — onaya tabi red maili):** Tedarikçi RED
+      yazıldığında, eğer kontak zaten ilerlemişse (test_sent veya sonrası),
+      Claude ile kibar bir red/vazgeçme maili taslağı üretilip Sheet3'e
+      yeni bir onay satırı (`mail_turu='red_bildirimi'`) olarak düşecek —
+      diğer tüm dışarı giden maillerle aynı prensip: Berkin onaylamadan
+      hiçbir mail gönderilmez.
+
+- [ ] **GAP-10 (Test aşamasında kabul edilebilir, M5 ÖNCESİ ZORUNLU):**
+      Mail onayında Gmail yanıtı içerik kontrolü yok (her yanıt otomatik
+      onay sayılıyor), red seçeneği yok. Şirket kurma/canlı satış öncesi
+      eklenmesi ZORUNLU — Claude ile yanıtın onay/red niyetini sınıflandır,
+      Sheet3 Excel Onay'a RED de yazılabilsin.
+
+- [ ] **GAP-11 (KARAR VERİLDİ — eklenecek):** Proforma çoklu-onay engeli +
+      red sonrası otomatik fallback. Bir tedarikçinin proformasını
+      onaylamak, aynı ürünün diğer bekleyen proformalarını otomatik İPTAL
+      yapacak. TÜM proformalar red olursa (başka bekleyen yoksa), ürün
+      otomatik olarak yeniden tedarikçi araştırmasına düşecek
+      (`iliski_tipi='reorder'`, mevcut alan zaten destekliyor).
+
+- [ ] **GAP-12 (KARAR VERİLDİ — gerçek yeniden tedarik tetiklenecek):**
+      `siparis.py._check_low_stock()` artık anlamsız yeni bir "ürün"
+      yaratmayacak. Onaylanan restock talebi, AYNI `product_id`'yi tekrar
+      tedarikçi araştırma kuyruğuna sokacak (`iliski_tipi='reorder'`),
+      mümkünse `preferred_suppliers` tablosundan (M5+, var ama kullanılmıyor)
+      bilinen iyi tedarikçi önerilecek.
+
+- [ ] **GAP-13 (KARAR VERİLDİ — minimal scaffold eklenecek):** Gerçek
+      webhook/API entegrasyonu olmadan otomatik iade algılama mümkün değil.
+      Şimdilik: `approval_queue`'ya yeni `request_type='return_manual'` —
+      Berkin bir iade fark ettiğinde manuel tetikleyebileceği basit bir giriş
+      noktası. Onaylandığında: `orders.status→returned` (GAP-7 sonrası
+      standart kelimeyle), `products.stock_count` geri artırılır,
+      `financials`'a negatif "iade" kaydı düşer. Gerçek otomasyon (webhook)
+      M6'da gerçek API'lerle gelecek.
+
+Kod implementasyonu ayrı, odaklı Claude Code oturumlarına bölünecek —
+GAP-7 (durum standardizasyonu) her şeyin temeli olduğu için İLK yapılacak,
+diğerleri (GAP-8, GAP-9, GAP-11, GAP-12, GAP-13) ondan sonra bağımsız
+oturumlarda. GAP-10 M5 öncesi zorunlu ama şimdilik backlog'da. GAP-6 küçük
+olduğu için GAP-7 oturumuna bindirilebilir.
+
 - [ ] **GAP-3:** financials tablosu şema tutarsızlığı — docs/infrastructure/
       SUPABASE.md ile agents/finans.py kodu farklı alanlar kullanıyor.
       Supabase'den information_schema.columns ile gerçek şema teyit edilip
@@ -163,3 +279,4 @@ Faz 3 tamamlanmadan başlamaz. Hazır plan: docs/guides/LOVABLE_MIGRATION_PLAN.m
 | Tarih | Değişiklik |
 |---|---|
 | 21 Temmuz 2026 | Konsolidasyon: ONBOARDING.md silindi, PENDING_FIXES.md → ROADMAP_TODO.md, GAP-1..5 eklendi, BUG-3/4/5 tamamlandı, GAP-2 kararı verildi (şimdi implemente edilecek), eticaret-operations kararı verildi (mock modda devam) |
+| 21 Temmuz 2026 | GAP-6..13 eklendi (mimari analiz + forklar netleştirildi), GAP-1/2 migration'ları uygulandı olarak işaretlendi, şirket kurulmadan önce güvenlik notu eklendi |
