@@ -12,12 +12,6 @@ from typing import Optional, List, Dict, Any
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/drive.file",
-]
 
 # ── Sheet sekme isimleri ───────────────────────────────────────────────────────
 TAB_URUN_ONAY       = "Ürün Onay"
@@ -195,21 +189,29 @@ P_TARIH           = 12
 def _get_credentials() -> Credentials:
     return Credentials(
         token=None,
-        refresh_token=os.environ["GMAIL_REFRESH_TOKEN"],
+        refresh_token=os.environ["GMAIL_REFRESH_TOKEN"].strip(),
         token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.environ["GMAIL_CLIENT_ID"],
-        client_secret=os.environ["GMAIL_CLIENT_SECRET"],
-        scopes=SCOPES,
+        client_id=os.environ["GMAIL_CLIENT_ID"].strip(),
+        client_secret=os.environ["GMAIL_CLIENT_SECRET"].strip(),
     )
 
 
 def get_sheets_service():
-    return build("sheets", "v4", credentials=_get_credentials())
+    return build(
+        "sheets",
+        "v4",
+        credentials=_get_credentials(),
+        cache_discovery=False,
+    )
 
 
 def get_gmail_service():
-    return build("gmail", "v1", credentials=_get_credentials())
-
+    return build(
+        "gmail",
+        "v1",
+        credentials=_get_credentials(),
+        cache_discovery=False,
+    )
 
 # ── Temel okuma/yazma fonksiyonları ────────────────────────────────────────────
 
