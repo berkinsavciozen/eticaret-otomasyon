@@ -1,6 +1,7 @@
 # Tedarikçi Agent — M4
 # Görev: Onaylanan ürünler için tedarikçi araştırması (Alibaba scraping),
-#         ürün×tedarikçi Sheet 2'ye yazma, TM-ID test maili, Sheet 3 onay akışı.
+#         ürün×tedarikçi Sheet 2'ye yazma, TM-ID test maili, Sheet 3 onay akışı,
+#         proforma teklif işleme (Sheet 4).
 # Çalışma sıklığı: Saatte 1 kez (Railway cron: 0 * * * *)
 #
 # Akış:
@@ -8,6 +9,8 @@
 #   Faz 2: Sheet 2 onaylı tedarikçiler → TM-ID test maili → Sheet 3 (Mail Onay)
 #   Faz 3: Sheet 3 onaylı test mailler → gerçek mail (MOCK_SUPPLIER_EMAIL)
 #   Faz 4: 48s geçen inquiry_sent'lere takip maili
+#   Faz 5: inquiry_sent/followup_sent kontaklar için proforma teklifi işleme
+#          (proforma_offers Supabase tablosu + Sheet 4)
 
 import os
 import re
@@ -33,6 +36,7 @@ from core.sheets_client import (
     check_mail_onay_approvals,
     process_tedarikci_onay_approvals,
     update_mail_onay_status,
+    append_proforma_onay,
     update_row,
     read_sheet,
     TAB_MAIL_ONAY,
@@ -47,6 +51,7 @@ SENDER_NAME      = os.getenv("SENDER_NAME", "E-Ticaret Ekibi")
 SENDER_EMAIL     = os.getenv("NOTIFICATION_EMAIL", "")
 MOCK_MAIL        = os.getenv("MOCK_SUPPLIER_EMAIL", "")
 TEST_MAIL_TO     = os.getenv("NOTIFICATION_EMAIL", "")  # Berkin'in Gmail'i
+USD_TRY_RATE     = float(os.getenv("USD_TRY_RATE", "34.0"))
 
 _HEADERS = {
     "User-Agent": (
@@ -79,6 +84,9 @@ def run():
         # Faz 4: Takip maili
         followup_count = _phase4_send_followups()
 
+        # Faz 5: Proforma teklifi işleme
+        proforma_count = _phase5_handle_proforma(sheet_id)
+
         duration_ms = int((time.time() - start) * 1000)
         log_run(
             AGENT_NAME,
@@ -92,11 +100,13 @@ def run():
                 "test_sent": test_sent,
                 "real_sent": real_sent,
                 "followups": followup_count,
+                "proforma": proforma_count,
             },
         )
         logger.info(
             f"Tedarikçi tamamlandı ({duration_ms}ms) — "
-            f"araştırıldı:{researched} test:{test_sent} gerçek:{real_sent} takip:{followup_count}"
+            f"araştırıldı:{researched} test:{test_sent} gerçek:{real_sent} "
+            f"takip:{followup_count} proforma:{proforma_count}"
         )
 
     except Exception as e:
@@ -396,6 +406,274 @@ def _phase4_send_followups() -> int:
     except Exception as e:
         logger.warning(f"Takip kontrolü başarısız: {e}")
         return 0
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# FAZ 5: Proforma teklifi işleme (GAP-2)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _phase5_handle_proforma(sheet_id: Optional[str]) -> int:
+    """
+    inquiry_sent/followup_sent durumundaki supplier_contacts için proforma
+    teklifi üretir/çıkarır. mock=true kontaklar için Claude Haiku ile sentetik
+    teklif üretilir (gerçek tedarikçi henüz yokken test edilebilsin diye);
+    mock=false kontaklar için Gmail yanıtı aranır ve içeriği Claude Haiku ile
+    yapılandırılmış veriye çevrilir. Sonuç proforma_offers'a insert edilir
+    ve Sheet 4'e append_proforma_onay() ile mirror'lanır.
+    """
+    client = get_client()
+    try:
+        contacts = (
+            client.table("supplier_contacts")
+            .select("*")
+            .in_("status", ["inquiry_sent", "followup_sent"])
+            .execute()
+        )
+    except Exception as e:
+        logger.warning(f"Faz 5: supplier_contacts okunamadı: {e}")
+        return 0
+
+    processed = 0
+    for sc in contacts.data:
+        contact_id = sc["id"]
+
+        try:
+            existing = (
+                client.table("proforma_offers")
+                .select("id")
+                .eq("supplier_contact_id", contact_id)
+                .execute()
+            )
+            if existing.data:
+                continue  # zaten proforma alınmış
+        except Exception as e:
+            logger.warning(f"Faz 5: proforma_offers sorgu hatası: {e}")
+            continue
+
+        try:
+            prod_res = client.table("products").select("*").eq("id", sc["product_id"]).execute()
+            if not prod_res.data:
+                continue
+            product = prod_res.data[0]
+        except Exception as e:
+            logger.warning(f"Faz 5: ürün sorgu hatası: {e}")
+            continue
+
+        if sc.get("mock"):
+            offer = _generate_mock_proforma(product, sc)
+        else:
+            offer = _extract_proforma_from_gmail(product, sc)
+            if not offer:
+                continue  # henüz yanıt yok, bir sonraki cron'da tekrar denenecek
+
+        offer_id = str(uuid.uuid4())
+        try:
+            client.table("proforma_offers").insert({
+                "id":                       offer_id,
+                "product_id":               sc["product_id"],
+                "supplier_contact_id":      contact_id,
+                "teklif_fiyat_usd":         offer.get("teklif_fiyat_usd"),
+                "moq":                      offer.get("moq"),
+                "teslim_sure_gun":          offer.get("teslim_sure_gun"),
+                "tahmini_cogs_tl":          offer.get("tahmini_cogs_tl"),
+                "tahmini_marj_pct":         offer.get("tahmini_marj_pct"),
+                "firsatci_tahmini_fark_tl": offer.get("firsatci_tahmini_fark_tl"),
+                "status":                   "pending",
+                "note":                     offer.get("note", ""),
+                "mock":                     bool(sc.get("mock", False)),
+            }).execute()
+        except Exception as e:
+            logger.warning(f"Faz 5: proforma_offers insert hatası: {e}")
+            continue
+
+        if sheet_id:
+            try:
+                append_proforma_onay(sheet_id, {
+                    "id":               offer_id,
+                    "product_id":       str(sc["product_id"]),
+                    "product_title":    product.get("name", ""),
+                    "supplier_name":    sc.get("supplier_name", ""),
+                    "teklif_fiyat_usd": offer.get("teklif_fiyat_usd", ""),
+                    "moq":              offer.get("moq", ""),
+                    "teslim_sure_gun":  offer.get("teslim_sure_gun", ""),
+                    "tahmini_cogs_tl":  offer.get("tahmini_cogs_tl", ""),
+                    "tahmini_marj_pct": offer.get("tahmini_marj_pct", ""),
+                    "firsatci_tahmini_tl": _get_estimated_price_tl(product),
+                    "durum":            "beklemede",
+                    "not":              offer.get("note", ""),
+                    "tarih":            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                })
+            except Exception as e:
+                logger.warning(f"Faz 5: Sheet 4 append hatası: {e}")
+
+        logger.info(f"Proforma alındı: {product.get('name')} / {sc.get('supplier_name')}")
+        processed += 1
+
+    return processed
+
+
+def _get_estimated_price_tl(product: dict) -> float:
+    """Ürünün fırsatçı tahmini satış fiyatını döner (metadata veya target_price_tl)."""
+    meta = product.get("metadata") or {}
+    return float(meta.get("estimated_price_tl") or product.get("target_price_tl") or 0)
+
+
+def _compute_cogs_and_margin(product: dict, teklif_fiyat_usd) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    USD teklif fiyatını TL COGS'a çevirir (USD_TRY_RATE), fırsatçının tahmini
+    satış fiyatına göre marj yüzdesini ve farkı hesaplar.
+    Fark = cogs - tahmini satış fiyatı (append_proforma_onay ile aynı işaret kuralı).
+    Returns: (tahmini_cogs_tl, tahmini_marj_pct, firsatci_tahmini_fark_tl)
+    """
+    if not teklif_fiyat_usd:
+        return None, None, None
+    cogs_tl = round(float(teklif_fiyat_usd) * USD_TRY_RATE, 2)
+    est_price = _get_estimated_price_tl(product)
+    marj_pct = fark = None
+    if est_price:
+        marj_pct = round((est_price - cogs_tl) / est_price * 100, 1)
+        fark = round(cogs_tl - est_price, 2)
+    return cogs_tl, marj_pct, fark
+
+
+def _generate_mock_proforma(product: dict, sc: dict) -> Dict[str, Any]:
+    """Mock tedarikçi kontakları için Claude Haiku ile sentetik proforma teklifi üretir."""
+    ai = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    product_name = product.get("name", "")
+    birim_usd    = sc.get("birim_usd")
+    moq          = sc.get("moq")
+
+    prompt = f"""Alibaba tedarikçisi '{sc.get("supplier_name", "Tedarikçi")}', '{product_name}' ürünü
+için proforma teklif gönderdi. İlk araştırmadaki tahmini birim fiyat: {birim_usd} USD, MOQ: {moq}.
+Gerçekçi bir proforma teklifi oluştur (ilk tahminden hafif sapmalı olabilir, sample/nakliye şartları içerebilir).
+
+SADECE JSON döndür:
+{{
+  "teklif_fiyat_usd": 12.8,
+  "moq": 50,
+  "teslim_sure_gun": 30,
+  "note": "Trade assurance destekler. %30 peşin, %70 sevkiyat öncesi."
+}}"""
+
+    try:
+        resp = ai.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+        offer = json.loads(raw)
+    except Exception as e:
+        logger.warning(f"Mock proforma üretilemedi, fallback kullanılıyor: {e}")
+        offer = {
+            "teklif_fiyat_usd": birim_usd or 10.0,
+            "moq":              moq or 50,
+            "teslim_sure_gun":  30,
+            "note":             "Mock proforma (fallback)",
+        }
+
+    offer["tahmini_cogs_tl"], offer["tahmini_marj_pct"], offer["firsatci_tahmini_fark_tl"] = (
+        _compute_cogs_and_margin(product, offer.get("teklif_fiyat_usd"))
+    )
+    return offer
+
+
+def _extract_proforma_from_gmail(product: dict, sc: dict) -> Optional[Dict[str, Any]]:
+    """
+    Gerçek tedarikçi yanıtını Gmail'de arar (ürün adına göre konu eşleşmesi).
+    Bulursa gövdeyi Claude Haiku ile yapılandırılmış proforma verisine çevirir.
+    Yanıt yoksa None döner (bir sonraki cron'da tekrar denenir).
+    """
+    product_name   = product.get("name", "")
+    supplier_email = sc.get("supplier_email", "")
+
+    try:
+        service = get_gmail_service()
+        query_parts = ["in:inbox", "newer_than:45d"]
+        if supplier_email:
+            query_parts.append(f"from:{supplier_email}")
+        results = service.users().messages().list(
+            userId="me", q=" ".join(query_parts), maxResults=20,
+        ).execute()
+
+        messages = results.get("messages", [])
+        for msg_ref in messages:
+            msg = service.users().messages().get(
+                userId="me", id=msg_ref["id"], format="full",
+            ).execute()
+            headers = msg["payload"].get("headers", [])
+            subject = next((h["value"] for h in headers if h["name"] == "Subject"), "")
+            if product_name and product_name.lower()[:15] not in subject.lower():
+                continue
+            body = _extract_gmail_body(msg["payload"])
+            if not body:
+                continue
+            return _claude_extract_proforma_fields(body, product, sc)
+
+    except Exception as e:
+        logger.warning(f"Faz 5: Gmail proforma arama hatası: {e}")
+
+    return None
+
+
+def _extract_gmail_body(payload: dict) -> str:
+    """Gmail mesaj payload'ından text/plain gövdeyi çıkarır (recursive, multipart destekli)."""
+    if payload.get("mimeType") == "text/plain" and payload.get("body", {}).get("data"):
+        return base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="ignore")
+    for part in payload.get("parts", []) or []:
+        text = _extract_gmail_body(part)
+        if text:
+            return text
+    return ""
+
+
+def _claude_extract_proforma_fields(body: str, product: dict, sc: dict) -> Dict[str, Any]:
+    """Claude Haiku ile serbest metin tedarikçi yanıtından fiyat/MOQ/teslim süresi çıkarır."""
+    ai = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    prompt = f"""Aşağıdaki tedarikçi mail yanıtından proforma teklif bilgilerini çıkar.
+
+Mail içeriği:
+\"\"\"{body[:2000]}\"\"\"
+
+SADECE JSON döndür:
+{{
+  "teklif_fiyat_usd": <birim fiyat USD, bulunamazsa null>,
+  "moq": <minimum sipariş adedi, bulunamazsa null>,
+  "teslim_sure_gun": <teslim süresi gün, bulunamazsa null>,
+  "note": "<mail içeriğinden kısa özet>"
+}}"""
+
+    try:
+        resp = ai.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+        offer = json.loads(raw)
+    except Exception as e:
+        logger.warning(f"Proforma alan çıkarma hatası: {e}")
+        offer = {
+            "teklif_fiyat_usd": sc.get("birim_usd"),
+            "moq":              sc.get("moq"),
+            "teslim_sure_gun":  None,
+            "note":             "Otomatik çıkarım başarısız, manuel kontrol gerekli",
+        }
+
+    offer["tahmini_cogs_tl"], offer["tahmini_marj_pct"], offer["firsatci_tahmini_fark_tl"] = (
+        _compute_cogs_and_margin(product, offer.get("teklif_fiyat_usd"))
+    )
+    return offer
 
 
 # ═════════════════════════════════════════════════════════════════════════════

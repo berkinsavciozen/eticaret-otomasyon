@@ -239,7 +239,14 @@ def _process_mail_approvals(sheet_id: str) -> int:
 # ── Sheet 4: Proforma Onay işleme ────────────────────────────────────────────
 
 def _process_proforma_approvals_step(sheet_id: str) -> tuple:
-    """Sheet 4'teki proforma onaylarını işler."""
+    """
+    Sheet 4'teki proforma onaylarını işler (GAP-2). Onaylanan bir proforma
+    bulunduğunda:
+    - İlgili proforma_offers (Supabase) kaydı 'approved' / 'rejected' olarak işaretlenir
+    - İlgili products kaydının status'u 'sourcing' → 'sourced' yapılır
+      (listeleme.py'nin _get_sourced_products() bu geçişi bekliyor)
+    - İlgili supplier_contacts kaydının status'u 'completed' yapılır
+    """
     if not sheet_id:
         return 0, 0
     try:
@@ -248,9 +255,52 @@ def _process_proforma_approvals_step(sheet_id: str) -> tuple:
         logger.warning(f"Sheet 4 okunamadı: {e}")
         return 0, 0
 
-    if approved_list:
-        logger.info(f"{len(approved_list)} proforma onaylandı (sipariş akışı M4'te)")
-    return len(approved_list), len(rejected_list)
+    client = get_client()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    approved_count = 0
+
+    for item in approved_list:
+        offer_id = item["id"]
+        try:
+            res = client.table("proforma_offers").select("*").eq("id", offer_id).execute()
+            if not res.data:
+                continue
+            offer = res.data[0]
+            if offer.get("status") != "pending":
+                continue  # zaten işlendi
+
+            client.table("proforma_offers").update({
+                "status":      "approved",
+                "reviewed_at": now_iso,
+            }).eq("id", offer_id).execute()
+
+            client.table("products").update({"status": "sourced"}).eq(
+                "id", offer["product_id"]
+            ).eq("status", "sourcing").execute()
+
+            if offer.get("supplier_contact_id"):
+                client.table("supplier_contacts").update({"status": "completed"}).eq(
+                    "id", offer["supplier_contact_id"]
+                ).execute()
+
+            approved_count += 1
+            logger.info(f"Proforma onaylandı: {offer_id} → ürün sourced, tedarikçi completed")
+        except Exception as e:
+            logger.error(f"Proforma onay işleme hatası {offer_id}: {e}")
+
+    for item in rejected_list:
+        offer_id = item["id"]
+        try:
+            client.table("proforma_offers").update({
+                "status":      "rejected",
+                "reviewed_at": now_iso,
+            }).eq("id", offer_id).execute()
+        except Exception as e:
+            logger.warning(f"Proforma red işleme hatası {offer_id}: {e}")
+
+    if approved_count:
+        logger.info(f"{approved_count} proforma onaylandı (sourced geçişi tetiklendi)")
+    return approved_count, len(rejected_list)
 
 
 # ── Sheet 1 mirror ────────────────────────────────────────────────────────────
