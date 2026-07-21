@@ -730,6 +730,46 @@ def process_proforma_approvals(spreadsheet_id: str) -> tuple:
     return approved, rejected
 
 
+def get_mail_onay_status_counts(spreadsheet_id: str) -> tuple:
+    """Sheet 3 Onay Durumu kolonundan (pending, approved) sayılarını döner."""
+    try:
+        rows = read_sheet(spreadsheet_id, f"'{TAB_MAIL_ONAY}'!A1:K500")
+    except Exception:
+        return 0, 0
+
+    PENDING_VALUES  = {"pending", "beklemede"}
+    APPROVED_VALUES = {"approved", "sent", "onaylandı"}
+
+    pending = approved = 0
+    for row in rows[1:]:
+        status = row[M_ONAY_DURUMU].strip().lower() if len(row) > M_ONAY_DURUMU else ""
+        if status in PENDING_VALUES:
+            pending += 1
+        elif status in APPROVED_VALUES:
+            approved += 1
+    return pending, approved
+
+
+def get_proforma_onay_status_counts(spreadsheet_id: str) -> tuple:
+    """Sheet 4 Durum kolonundan (pending, approved) sayılarını döner."""
+    try:
+        rows = read_sheet(spreadsheet_id, f"'{TAB_PROFORMA_ONAY}'!A1:M500")
+    except Exception:
+        return 0, 0
+
+    PENDING_VALUES  = {"pending", "beklemede"}
+    APPROVED_VALUES = {"approved", "onay", "onaylandı"}
+
+    pending = approved = 0
+    for row in rows[1:]:
+        status = row[P_DURUM].strip().lower() if len(row) > P_DURUM else ""
+        if status in PENDING_VALUES:
+            pending += 1
+        elif status in APPROVED_VALUES:
+            approved += 1
+    return pending, approved
+
+
 # ── Sheet 5: Dashboard ────────────────────────────────────────────────────────
 
 def refresh_dashboard(spreadsheet_id: str, pipeline_data: Dict[str, Any]):

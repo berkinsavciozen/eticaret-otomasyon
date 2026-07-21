@@ -37,20 +37,7 @@ ALTER TABLE supplier_contacts ENABLE ROW LEVEL SECURITY;
 
 ## 🟠 Orta Öncelikli — Sonraki Session
 
-### BUG-3: `orkestrator.py` — Dashboard Hardcoded Değerler
-**Dosya:** `agents/orkestrator.py` — `_refresh_dashboard_step()`  
-**Sorun:** `"mail_pending": 0, "proforma_pending": 0` hardcoded — Sheet 3/4'ten gerçek sayı okunmuyor  
-**Fix:** Sheet 3 ve Sheet 4'ten gerçek pending sayılarını sorgula
-
-### BUG-4: `orkestrator.py` — Stale TODO Notu
-**Dosya:** `agents/orkestrator.py` — `_process_mail_approvals()`  
-**Sorun:** "gerçek gönderim M4'te aktif olacak" notu kaldı — M4 tamamlandı  
-**Fix:** TODO notunu kaldır veya güncelle
-
-### BUG-5: `railway.toml` — Stale Cron Comment'ler
-**Dosya:** `railway.toml`  
-**Sorun:** Cron comment'leri eski değerleri gösteriyor (*/15 ve 0 7)  
-**Fix:** Comment'leri güncelle veya kaldır (gerçek cron Railway Variables'ta zaten doğru)
+_Şu an bu bölümde açık madde yok — BUG-3, BUG-4, BUG-5 tamamlandı (bkz. "✅ Tamamlananlar")._ 
 
 ---
 
@@ -96,6 +83,24 @@ Detay: `guides/TOKEN_OPTIMIZATION.md`
 **Etkilenen:** `agents/siparis.py`, `agents/listeleme.py`  
 **Tüm geliştirme V3 base URL'den yapılmalı:** `https://apigw.trendyol.com`
 
+### Orkestrator Cron Sıklığı — Geçici Düşürüldü
+**Durum:** `eticaret-otomasyon` (orkestrator) cron'u Railway'de bilerek 30 dakikadan
+**günde 2 kez'e** (`0 7,19 * * *`) düşürüldü, çünkü `tedarikci.py` Faz 3'teki gerçek
+tedarikçi mail gönderimi henüz üretimde sık çalıştırılacak kadar olgunlaşmadı.
+**Not:** Faz 3 stabilize olup güvenilir çalıştığı doğrulanınca eski sıklığa
+(`*/30 * * * *` gibi) geri dönülmesi düşünülebilir. (Detay: `railway.toml` yorumu)
+
+### `eticaret-operations` Servisi — Sadece MOCK Modda
+**Durum:** `eticaret-operations` (AGENT_NAME=operations) servisi `main.py` üzerinden
+mevcut `listeleme.py` + `siparis.py` + `finans.py` agentlarını sırayla çalıştırıyor
+(ayrı bir `agents/operations.py` dosyasına ihtiyaç yok, main.py bunu zaten doğru
+handle ediyor — bkz. BUG-5). Ancak bu üç agent'ın Shopify/Trendyol/banka API
+entegrasyonları henüz gerçek değil, hepsi `MOCK_LISTING` / `MOCK_ORDERS` /
+`MOCK_FINANCIALS` env var'larına bağlı mock modda çalışıyor.
+**Öneri (kod değişikliği gerekmez):** Gerçek entegrasyonlar tamamlanana kadar bu
+servisi Railway'de pause etmeyi değerlendirebilirsin — şu an çalışsa da mock veri
+üretmekten öteye geçmiyor.
+
 ---
 
 ## ✅ Tamamlananlar (Referans)
@@ -107,3 +112,6 @@ Detay: `guides/TOKEN_OPTIMIZATION.md`
 | `orkestrator.py` — Sheet mirror try/except (token expiry fix) | `19aa437` | Haziran 2026 |
 | Fırsatçı Opt-3: Koşullu priority ranking | `cf662af` | Haziran 2026 |
 | Fırsatçı Opt-4: Enrich'e sadece top 3 gönder | `cf662af` | Haziran 2026 |
+| BUG-3: `orkestrator.py` dashboard mail/proforma pending gerçek verilerle değiştirildi (`get_mail_onay_status_counts` / `get_proforma_onay_status_counts` eklendi) | `278c9e4` | Temmuz 2026 |
+| BUG-4: `orkestrator.py` stale M4 TODO'su temizlendi, `_process_mail_approvals()` artık Sheet 3'e yazmıyor (duplike işleme riski tedarikci.py Faz 3 ile çakışmasın diye) | `7357f00` | Temmuz 2026 |
+| BUG-5: `railway.toml` cron comment'leri gerçek Railway durumuna göre güncellendi, `eticaret-operations`/main.py doğrulandı | `df043d3` | Temmuz 2026 |
