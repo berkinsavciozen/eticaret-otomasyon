@@ -8,7 +8,6 @@
 docs/
 ├── README.md                     ← Bu dosya
 ├── MASTER_PLAN.md                ← Sistem mimarisi, milestone geçmişi, roadmap
-├── ONBOARDING.md                 ← Yeni Claude instance için başlangıç promptu
 ├── agents/
 │   ├── index.md                  ← Agent özet tablosu + pipeline diyagramı
 │   ├── orkestrator.md
@@ -26,13 +25,13 @@ docs/
 └── guides/
     ├── SETUP.md                  ← Kurulum rehberi (fazlar halinde)
     ├── TOKEN_OPTIMIZATION.md     ← Claude API maliyet optimizasyonu
-    └── PENDING_FIXES.md          ← Bilinen buglar + yapılacaklar listesi
+    ├── ROADMAP_TODO.md           ← Canlı TODO kaynağı — bilinen buglar, GAP'ler, faz durumu
+    └── LOVABLE_MIGRATION_PLAN.md ← Lovable FE geçiş planı (Faz 4'e kadar kilitli)
 ```
 
 ## Kullanım Kuralları
 
-- **Yeni Claude session açarken:** `docs/ONBOARDING.md` içeriğini kopyalayıp ilk mesaj olarak gönder
-- **Güncel durumu öğrenmek için:** `docs/PENDING_FIXES.md` ve ilgili agent dosyasına bak
+- **Güncel durumu öğrenmek için:** `docs/guides/ROADMAP_TODO.md` ve ilgili agent dosyasına bak
 - **Credential değerleri bu klasörde YOK** — sadece Bitwarden'de saklanır
 - **`.env` hiçbir zaman commit edilmez** — `.gitignore`'da tanımlı
 
