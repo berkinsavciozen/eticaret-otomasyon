@@ -14,7 +14,6 @@ from core.sheets_client import (
     process_urun_onay_approvals,
     process_tedarikci_onay_approvals,
     check_mail_onay_approvals,
-    update_mail_onay_status,
     process_proforma_approvals,
     get_mail_onay_status_counts,
     get_proforma_onay_status_counts,
@@ -210,7 +209,15 @@ def _process_tedarikci_approvals(sheet_id: str) -> tuple:
 # ── Sheet 3: Mail Onay işleme ─────────────────────────────────────────────────
 
 def _process_mail_approvals(sheet_id: str) -> int:
-    """Sheet 3'te onaylanan test maillerini gerçek tedarikçiye gönderir."""
+    """Sheet 3'te onaylı (gönderim bekleyen) mail sayısını raporlar.
+
+    Gerçek tedarikçi mail gönderimi artık tedarikci.py → _phase3_send_real_mails()
+    tarafından yapılıyor (aynı check_mail_onay_approvals() ile Sheet 3'ü okuyup
+    gerçek maili gönderiyor ve durumu "sent" olarak işaretliyor). Burada Sheet 3'e
+    ayrıca yazmıyoruz — iki fonksiyonun aynı satırları farklı durumlarla
+    güncellemesi (duplike işleme) riskini önlemek için bu fonksiyon salt
+    okuma/loglama amaçlıdır.
+    """
     if not sheet_id:
         return 0
 
@@ -220,24 +227,13 @@ def _process_mail_approvals(sheet_id: str) -> int:
         logger.warning(f"Sheet 3 okunamadı: {e}")
         return 0
 
-    sent_count = 0
-    for mail in approved_mails:
-        try:
-            # TODO M4: Gerçek tedarikçi mail gönderimi (tedarikci agent'a devret)
-            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            update_mail_onay_status(
-                sheet_id,
-                mail["row_num"],
-                status="approved",
-                gercek_gonderim=now_str,
-                note="Onay alındı — gerçek gönderim M4'te aktif olacak",
-            )
-            logger.info(f"Mail onaylandı: {mail.get('tm_id')} — {mail.get('product_title')}")
-            sent_count += 1
-        except Exception as e:
-            logger.error(f"Mail onay güncelleme hatası: {e}")
+    if approved_mails:
+        logger.info(
+            f"{len(approved_mails)} mail onayı gönderim bekliyor "
+            f"(gerçek gönderim tedarikci.py Faz 3'te yapılır)"
+        )
 
-    return sent_count
+    return len(approved_mails)
 
 
 # ── Sheet 4: Proforma Onay işleme ────────────────────────────────────────────
